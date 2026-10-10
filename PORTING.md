@@ -355,9 +355,53 @@ a call have `id: null`; the page lives at `/boards/:id`.
 
 `tests/server/service.ts` starts the service on port 0 against the
 scratch Mongo and wraps a Bun `WebSocket` as `TestClient` (`hello`, `call`,
-`next`, `none`, `closed`). `token.test.ts` (9), `config.test.ts` (5),
-`http.test.ts` (15), `ws.test.ts` (26) and `rooms.test.ts` (7) cover what
-the design asks for; 62 cases in all.
+`next`, `none`, `closed`). `token.test.ts` (9), `config.test.ts` (7), `http.test.ts` (15),
+`ws.test.ts` (26) and `rooms.test.ts` (7) cover what the design asks for;
+64 cases in all. `ddp.test.ts` (8) runs the DDP client against a fake
+socket, and `feed.test.ts` has one case without a server (`FEED=off`) and
+nine against a running Jolly Roger (login, the first load and placement, a
+puzzle added, a tag change moving a card, a renamed tag, a deleted puzzle
+hidden and shown again, a reconnect's resync, and a deleted board), skipped
+unless `JR_TEST_URL` is set.
+
+## `server/feed/`: the feed from Jolly Roger
+
+New, to the service design; it stands in for the hooks and methods that
+called placement in Jolly Roger, with the puzzle and tag writes happening
+over there and arriving here over DDP.
+
+- `ddp.ts`: a DDP 1 client over `WebSocket` (Bun's, or a `SocketLike` a
+  test hands in): `connect`/`connected`, `ping`/`pong`, `sub`/`unsub` with
+  `ready` and `nosub`, `added`/`changed` (`fields` and `cleared`)/`removed`
+  to `onData`, `method` with `result`, and `login` with `{ resume }` or
+  `{ user: { email }, password: { digest, algorithm: "sha-256" } }` (the
+  token first, the password once it's refused; the token a login returns is
+  kept for the next connect). A dropped socket reconnects with backoff
+  (`minBackoffMs` doubling to `maxBackoffMs`, 1 s to 30 s), logs in and
+  sends every subscription again. Frames are `EJSON` from `lib/compat`.
+  Pending calls are rejected on a drop rather than re-sent.
+- `hunts.ts` (`startHuntFeeds`): one subscription pair per hunt with a
+  board, `Puzzles.publications.forHunt` (`{ huntId, includeDeleted: true }`,
+  which the server honours for admins) and `Puzzles.publications.forPuzzleList`
+  (`{ huntId }`; the tags come with it, as Jolly Roger has no tags-only
+  publication; its bookmarks are ignored). Hunts are found from
+  `Whiteboards` at start and from the change seam after (a hunt board
+  added or removed). Documents are mirrored into `Puzzles`/`Tags` keeping
+  only the fields the copies declare: `added` is a replacement upsert,
+  `changed` a `$set`/`$unset`, `removed` a soft delete (so placement
+  retires the card, as `destroyPuzzle`'s hook did), each in the order
+  received. The puzzles a batch touched (for a tag, those carrying it, as
+  `renameOrMergeTag` found them) go to `deferSyncPuzzlesOnBoard` 50 ms
+  after the last change; `deferSyncRoundsOnBoard` isn't used, since no
+  Jolly Roger tag path called it. After a connect the hunt's batch waits
+  until both subscriptions are ready, then copies the server didn't send
+  are retired and the whole hunt goes to placement at once. A board's
+  deletion drops the pair and the hunt's copies.
+- `index.ts` (`startFeed`): the client on `<JR_URL>/websocket` with the
+  configured credentials, plus the hunt feeds; `app.ts` starts it once the
+  server is listening (unless `FEED=off`) and stops it first on shutdown.
+- `config.ts`: `feed` from `JR_SERVICE_TOKEN`, `JR_SERVICE_EMAIL` and
+  `JR_SERVICE_PASSWORD`, and `FEED`.
 
 ## `client/`: the board in the browser
 
@@ -560,8 +604,6 @@ client in a browser.
 
 ## Left for later workstreams
 
-- The feed: `syncPuzzlesOnBoard` and `deferSyncPuzzlesOnBoard` take the
-  puzzle ids it mirrors; the `Puzzles` and `Tags` copies are written by it.
 - Image uploads and the signed policy; the `tag.synonyms` setting.
 - Names for people who haven't been on the board this session (a
   comment's author, a version's editors, who locked a node): the feed or
