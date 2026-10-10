@@ -100,7 +100,7 @@ const CommentText = ({
     } else if (nodeIsPuzzle(child)) {
       return <PuzzleMention key={i} puzzleId={child.puzzleId} />;
     } else {
-      return <ChatMarkdown key={i} text={child.text} />;
+      return <ChatMarkdown key={i} text={child.text} safeLinks />;
     }
   });
 
