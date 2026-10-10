@@ -10,8 +10,10 @@ import { ClaimsSchema } from "lib/protocol";
 
 export const TOKEN_VERSION = 1;
 // How far ahead a token's exp may be. Jolly Roger mints them for five
-// minutes, so one further out is forged or from a clock that's off.
+// minutes, so one further out is forged or from a clock that's off; the
+// skew is how far off the two clocks are allowed to be.
 export const MAX_TOKEN_LIFETIME_MS = 5 * 60 * 1000;
+export const TOKEN_SKEW_MS = 60 * 1000;
 
 const base64url = (bytes: Buffer) => bytes.toString("base64url");
 
@@ -59,7 +61,7 @@ export function verifyToken(
   }
   const claims = result.data;
   if (claims.exp <= now) throw invalid("Token expired");
-  if (claims.exp > now + MAX_TOKEN_LIFETIME_MS) {
+  if (claims.exp > now + MAX_TOKEN_LIFETIME_MS + TOKEN_SKEW_MS) {
     throw invalid("Token expiry too far ahead");
   }
   return claims;

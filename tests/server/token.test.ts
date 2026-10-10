@@ -5,6 +5,7 @@ import { Random } from "lib/compat/random";
 import {
   MAX_TOKEN_LIFETIME_MS,
   signToken,
+  TOKEN_SKEW_MS,
   verifyToken,
 } from "../../server/token";
 
@@ -83,20 +84,21 @@ describe("token", () => {
     fails(signToken({ ...claims(), exp: now }, secret), /expired/i);
   });
 
-  it("refuses an expiry too far ahead", () => {
+  it("refuses an expiry further ahead than the lifetime plus the skew", () => {
     assert.equal(MAX_TOKEN_LIFETIME_MS, 5 * 60 * 1000);
-    const tooFar = signToken(
-      { ...claims(), exp: now + MAX_TOKEN_LIFETIME_MS + 1 },
-      secret,
-    );
-    fails(tooFar, /too far/i);
-    const justInside = signToken(
-      { ...claims(), exp: now + MAX_TOKEN_LIFETIME_MS },
+    assert.equal(TOKEN_SKEW_MS, 60 * 1000);
+    const furthest = now + MAX_TOKEN_LIFETIME_MS + TOKEN_SKEW_MS;
+    fails(signToken({ ...claims(), exp: furthest + 1 }, secret), /too far/i);
+    const justInside = signToken({ ...claims(), exp: furthest }, secret);
+    assert.equal(verifyToken(justInside, secret, now).exp, furthest);
+    // A token minted for five minutes by a clock a minute ahead
+    const skewed = signToken(
+      { ...claims(), exp: now + MAX_TOKEN_LIFETIME_MS + TOKEN_SKEW_MS / 2 },
       secret,
     );
     assert.equal(
-      verifyToken(justInside, secret, now).exp,
-      now + MAX_TOKEN_LIFETIME_MS,
+      verifyToken(skewed, secret, now).exp,
+      now + MAX_TOKEN_LIFETIME_MS + TOKEN_SKEW_MS / 2,
     );
   });
 
