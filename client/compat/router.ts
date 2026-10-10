@@ -24,8 +24,16 @@ export const Link = forwardRef<
   });
 });
 
+// Going to a Jolly Roger page means the top window leaving for it. One
+// seam, so a test page (which can't leave) can record the visit instead.
+export const topNavigation = {
+  go(url: string) {
+    (window.top ?? window).location.href = url;
+  },
+};
+
 export function useNavigate() {
   return (to: string) => {
-    (window.top ?? window).location.href = jrHref(to);
+    topNavigation.go(jrHref(to));
   };
 }
