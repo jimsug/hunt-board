@@ -1,0 +1,378 @@
+export type GuessState = keyof Theme["colors"]["guess"];
+export type SolvednessState = keyof Theme["colors"]["solvedness"];
+
+export interface Theme {
+  basicMode: string;
+  colors: {
+    background: string;
+    text: string;
+    textSecondary: string;
+    border: string;
+    primary: string;
+    secondary: string;
+    callStateIcon: string;
+    mutedIconBorder: string;
+    deafenedIconBorder: string;
+    mutedIconText: string;
+    localMutedIconText: string;
+    remoteMuteButtonHoverBackground: string;
+    remoteMuteButtonHoverText: string;
+    chatterSectionBackground: string;
+    codeBlockBackground: string;
+    codeBlockText: string;
+    mentionSpanBackground: string;
+    mentionSpanText: string;
+    selfMentionSpanBackground: string;
+    selfMentionSpanText: string;
+    selectedMentionSpanShadow: string;
+    puzzleSpanText: string;
+    selectedPuzzleSpanShadow: string;
+    autocompleteBackground: string;
+    autocompleteShadow: string;
+    matchCandidateSelectedBackground: string;
+    documentMessageBackground: string;
+    avatarInitialText: string;
+    avatarInitialBackground: string;
+    avatarSelfBorder: string;
+    avatarSelfShadow: string;
+    breadcrumbText: string;
+    breadcrumbBeforeText: string;
+    announcementToastBackground: string;
+    announcementToastText: string;
+    announcementToastBorder: string;
+    hoverChatMessageBackground: string;
+    systemChatMessageBackground: string;
+    pinnedChatMessageBackground: string;
+    // Pinned messages (pinnedChatMessageBackground is the highlight on
+    // messages that ding the viewer)
+    pinnedMessageBackground: string;
+    pulseChatMessageBackground: string;
+    replyChatMessageBackground: string;
+    replyingToBackground: string;
+    replyButtonText: string;
+    hoverReplyButtonText: string;
+    chatActionHoverBackground: string;
+    ownReactionBackground: string;
+    ownReactionBorder: string;
+    chatBadgeText: string;
+    missedMessagesBadgeBackground: string;
+    fancyEditorBackground: string;
+    navBarBottomBorder: string;
+    navBarBackground: string;
+    setupPageHeaderBackground: string;
+    setupPageCircuitBreakerHeaderBackground: string;
+    jumbotronBackground: string;
+    bookmarkedIcon: string;
+    priorityHighIcon: string;
+    // The stripes across a locked puzzle's row and board card
+    lockedPuzzleStripe: string;
+    notesHeaderShadow: string;
+    // Someone on a puzzle: online, idle (only hidden tabs for a while) or away,
+    // as the chat pane's dots and the avatar stacks' rings show it
+    presence: {
+      online: string;
+      idle: string;
+      away: string;
+    };
+    // The puzzle history page: the kinds of interaction someone had with a
+    // puzzle, and the solved icon
+    historyActiveInteraction: string;
+    historySolvedIcon: string;
+    // Whiteboard comment pins, cursors and puzzle cards
+    resolvedCommentMarkBackground: string;
+    whiteboardCursorOutline: string;
+    metaBadgeBackground: string;
+    metaBadgeText: string;
+    // A stuck puzzle's card edge at mid zoom, the tick on a finished round,
+    // and the edge of a collapsed round with an unsolved puzzle in it
+    whiteboardStuckEdge: string;
+    whiteboardFinishedTick: string;
+    whiteboardUnsolvedInside: string;
+    // What a preview of an earlier version has differently from the board
+    whiteboardPreviewChanged: string;
+    // The board behind everything on it, on screen and in a downloaded
+    // picture
+    whiteboardBackground: string;
+    guess: {
+      correct: {
+        background: string;
+        hoverBackground: string;
+        icon: string;
+      };
+      intermediate: {
+        background: string;
+        hoverBackground: string;
+        icon: string;
+      };
+      incorrect: {
+        background: string;
+        hoverBackground: string;
+        icon: string;
+      };
+      rejected: {
+        background: string;
+        hoverBackground: string;
+        icon: string;
+      };
+      pending: {
+        background: string;
+        hoverBackground: string;
+        icon: string;
+      };
+    };
+    solvedness: {
+      noAnswers: string;
+      unsolved: string;
+      solved: string;
+    };
+    // Cards on the whiteboard's mini map, stronger than the card backgrounds
+    // so they show at that size
+    miniMapSolvedness: {
+      noAnswers: string;
+      unsolved: string;
+      solved: string;
+    };
+    // Five steps from "no activity" to "most activity"
+    contributionsGraph: readonly [string, string, string, string, string];
+  };
+}
+
+export const lightTheme: Theme = {
+  basicMode: "light",
+  colors: {
+    background: "var(--bs-body-bg)",
+    text: "var(--bs-body-color)",
+    textSecondary: "#6c757d",
+    border: "var(--bs-border-color)",
+    primary: "var(--bs-primary)",
+    secondary: "var(--bs-secondary)",
+    callStateIcon: "#dc3545",
+    mutedIconBorder: "#0d6efd",
+    deafenedIconBorder: "#0d6efd",
+    mutedIconText: "red",
+    localMutedIconText: "black",
+    remoteMuteButtonHoverBackground: "rgb(30 30 30 / 50%)",
+    remoteMuteButtonHoverText: "#ccc",
+    chatterSectionBackground: "#f3e5e5",
+    codeBlockBackground: "#eee",
+    codeBlockText: "black",
+    mentionSpanBackground: "#eef",
+    mentionSpanText: "inherit",
+    selfMentionSpanBackground: "#ced0ed",
+    selfMentionSpanText: "#4649ef",
+    selectedMentionSpanShadow: "#b4d5ff",
+    puzzleSpanText: "inherit",
+    selectedPuzzleSpanShadow: "#b4d5ff",
+    autocompleteBackground: "white",
+    autocompleteShadow: "0 1px 5px rgb(0 0 0 / 20%)",
+    matchCandidateSelectedBackground: "#e0ecfc",
+    documentMessageBackground: "#ddf",
+    avatarInitialText: "#ffffff",
+    avatarInitialBackground: "#000000",
+    avatarSelfBorder: "#0D6EFD",
+    avatarSelfShadow: "rgba(13, 110, 253, 0.5)",
+    breadcrumbText: "rgba(0 0 0 / 65%)",
+    breadcrumbBeforeText: "rgba(0 0 0 / 65%)",
+    announcementToastBackground: "white",
+    announcementToastText: "black",
+    announcementToastBorder: "rgba(0, 0, 0, 0.1)",
+    hoverChatMessageBackground: "#f0f0f0",
+    systemChatMessageBackground: "#e0e0e0",
+    pinnedChatMessageBackground: "#ffff70",
+    pinnedMessageBackground: "#ffff70",
+    pulseChatMessageBackground: "rgb(255 193 7 / 70%)",
+    replyChatMessageBackground: "#e0f0ff",
+    replyingToBackground: "#eee",
+    replyButtonText: "#666",
+    hoverReplyButtonText: "#000",
+    chatActionHoverBackground: "#e0ecfc",
+    ownReactionBackground: "#ced0ed",
+    ownReactionBorder: "var(--bs-primary)",
+    chatBadgeText: "white",
+    missedMessagesBadgeBackground: "var(--bs-danger)",
+    fancyEditorBackground: "#eee",
+    navBarBottomBorder: "#6c757d",
+    navBarBackground: "#f0f0f0",
+    setupPageHeaderBackground: "#f0f0f0",
+    setupPageCircuitBreakerHeaderBackground: "#eef",
+    jumbotronBackground: "#e9ecef",
+    bookmarkedIcon: "var(--bs-warning)",
+    priorityHighIcon: "red",
+    lockedPuzzleStripe: "rgb(128 128 128 / 10%)",
+    notesHeaderShadow: "rgb(0 0 0 / 20%)",
+    presence: {
+      online: "var(--bs-success)",
+      idle: "var(--bs-warning)",
+      away: "var(--bs-secondary)",
+    },
+    historyActiveInteraction: "var(--bs-success)",
+    historySolvedIcon: "var(--bs-success)",
+    resolvedCommentMarkBackground: "var(--bs-success)",
+    whiteboardCursorOutline: "#fff",
+    metaBadgeBackground: "var(--bs-warning)",
+    metaBadgeText: "#000",
+    whiteboardStuckEdge: "var(--bs-danger)",
+    whiteboardFinishedTick: "var(--bs-success)",
+    whiteboardUnsolvedInside: "var(--bs-warning)",
+    whiteboardPreviewChanged: "var(--bs-pink)",
+    whiteboardBackground: "#fff",
+    guess: {
+      correct: {
+        background: "#f0fff0",
+        hoverBackground: "#d0ffd0",
+        icon: "#00ff00",
+      },
+      intermediate: {
+        background: "#fffff0",
+        hoverBackground: "#ffffd0",
+        icon: "#dddd00",
+      },
+      incorrect: {
+        background: "#fff0f0",
+        hoverBackground: "#ffd0d0",
+        icon: "#ff0000",
+      },
+      rejected: {
+        background: "#f0f0f0",
+        hoverBackground: "#d0d0d0",
+        icon: "#000000",
+      },
+      pending: {
+        background: "#f0f0ff",
+        hoverBackground: "#d0d0ff",
+        icon: "#0000ff",
+      },
+    },
+    solvedness: {
+      noAnswers: "#dfdfff",
+      unsolved: "#f0f0f0",
+      solved: "#dfffdf",
+    },
+    miniMapSolvedness: {
+      noAnswers: "#5c7cfa",
+      unsolved: "#adb5bd",
+      solved: "#2f9e44",
+    },
+    contributionsGraph: ["#ebedf0", "#c6e48b", "#7bc96f", "#239a3b", "#196127"],
+  },
+};
+
+export const darkTheme: Theme = {
+  basicMode: "dark",
+  colors: {
+    background: "var(--bs-dark-bg-subtle)",
+    text: "var(--bs-body-color)",
+    textSecondary: "#aaa",
+    border: "var(--bs-border-color)",
+    primary: "var(--bs-primary)",
+    secondary: "var(--bs-secondary)",
+    callStateIcon: "#f8d7da",
+    mutedIconBorder: "#6fa8dc",
+    deafenedIconBorder: "#6fa8dc",
+    mutedIconText: "red",
+    localMutedIconText: "black",
+    remoteMuteButtonHoverBackground: "rgb(200 200 200 / 50%)",
+    remoteMuteButtonHoverText: "#ccc",
+    chatterSectionBackground: "#333",
+    codeBlockBackground: "#333",
+    codeBlockText: "white",
+    mentionSpanBackground: "#444",
+    mentionSpanText: "inherit",
+    selfMentionSpanBackground: "#4649ef",
+    selfMentionSpanText: "#fff",
+    selectedMentionSpanShadow: "#b4d5ff",
+    puzzleSpanText: "inherit",
+    selectedPuzzleSpanShadow: "#b4d5ff",
+    autocompleteBackground: "#333",
+    autocompleteShadow: "0 1px 5px rgb(255 255 255 / 20%)",
+    matchCandidateSelectedBackground: "#444",
+    documentMessageBackground: "#333",
+    avatarInitialText: "#ffffff",
+    avatarInitialBackground: "#000000",
+    avatarSelfBorder: "#6fa8dc",
+    avatarSelfShadow: "rgba(111, 168, 220, 0.5)",
+    breadcrumbText: "rgba(255 255 255 / 65%)",
+    breadcrumbBeforeText: "rgba(255 255 255 / 65%)",
+    announcementToastBackground: "#333",
+    announcementToastText: "white",
+    announcementToastBorder: "rgba(255, 255, 255, 0.1)",
+    hoverChatMessageBackground: "#222",
+    systemChatMessageBackground: "rgb(31, 31, 31)",
+    pinnedChatMessageBackground: "rgb(92, 56, 17)",
+    pinnedMessageBackground: "rgb(92, 56, 17)",
+    pulseChatMessageBackground: "rgb(255 193 7 / 70%)",
+    replyChatMessageBackground: "rgb(0, 56, 109)",
+    replyingToBackground: "#383838",
+    replyButtonText: "#aaa",
+    hoverReplyButtonText: "#fff",
+    chatActionHoverBackground: "#444",
+    ownReactionBackground: "#4649ef",
+    ownReactionBorder: "var(--bs-primary)",
+    chatBadgeText: "white",
+    missedMessagesBadgeBackground: "var(--bs-danger)",
+    fancyEditorBackground: "#383838",
+    navBarBottomBorder: "#6c757d",
+    navBarBackground: "#333333",
+    setupPageHeaderBackground: "#333333",
+    setupPageCircuitBreakerHeaderBackground: "#333355",
+    jumbotronBackground: "inherit",
+    bookmarkedIcon: "var(--bs-warning)",
+    priorityHighIcon: "red",
+    lockedPuzzleStripe: "rgb(128 128 128 / 10%)",
+    notesHeaderShadow: "rgb(0 0 0 / 20%)",
+    presence: {
+      online: "var(--bs-success)",
+      idle: "var(--bs-warning)",
+      away: "var(--bs-secondary)",
+    },
+    historyActiveInteraction: "var(--bs-success)",
+    historySolvedIcon: "var(--bs-success)",
+    resolvedCommentMarkBackground: "var(--bs-success)",
+    whiteboardCursorOutline: "#fff",
+    metaBadgeBackground: "var(--bs-warning)",
+    metaBadgeText: "#000",
+    whiteboardStuckEdge: "var(--bs-danger)",
+    whiteboardFinishedTick: "var(--bs-success)",
+    whiteboardUnsolvedInside: "var(--bs-warning)",
+    whiteboardPreviewChanged: "var(--bs-pink)",
+    whiteboardBackground: "#141414",
+    guess: {
+      correct: {
+        background: "#155724",
+        hoverBackground: "#11461b",
+        icon: "#d4edda",
+      },
+      intermediate: {
+        background: "#856404",
+        hoverBackground: "#6e5303",
+        icon: "#fff3cd",
+      },
+      incorrect: {
+        background: "#721c24",
+        hoverBackground: "#5e171d",
+        icon: "#f8d7da",
+      },
+      rejected: {
+        background: "#383d41",
+        hoverBackground: "#2e3238",
+        icon: "#e2e3e5",
+      },
+      pending: {
+        background: "#333",
+        hoverBackground: "#444",
+        icon: "#fff",
+      },
+    },
+    solvedness: {
+      noAnswers: "rgb(77, 77, 118)",
+      unsolved: "rgb(46, 46, 46)",
+      solved: "rgb(32, 66, 32)",
+    },
+    miniMapSolvedness: {
+      noAnswers: "#748ffc",
+      unsolved: "#868e96",
+      solved: "#51cf66",
+    },
+    contributionsGraph: ["#22272e", "#004225", "#006d32", "#30a14e", "#39d353"],
+  },
+};
