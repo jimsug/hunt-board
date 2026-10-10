@@ -6,13 +6,19 @@ import { createHttpHandler } from "./http";
 import Logger from "./logger";
 import { closeRooms } from "./rooms";
 import { deferredSyncsDone } from "./whiteboard";
+import { pruneWhiteboardVersions } from "./whiteboardVersions";
 import type { SocketData } from "./ws";
 import { createWebSocketHandler } from "./ws";
 
 // The served process, as one object: Bun.serve with the HTTP routes and the
 // websocket on /ws, the feed from Jolly Roger once the server is listening,
-// and a stop that closes every socket. main.ts runs it on the configured
-// port; tests run it on port 0.
+// the hourly prune of board history (Jolly Roger's cron job), and a stop
+// that closes every socket. main.ts runs it on the configured port; tests
+// run it on port 0.
+
+// The prune runs a minute after start, then every hour
+export const PRUNE_FIRST_DELAY_MS = 60 * 1000;
+export const PRUNE_INTERVAL_MS = 60 * 60 * 1000;
 
 export interface ServiceOptions {
   config: Config;
@@ -20,6 +26,10 @@ export interface ServiceOptions {
   distDir?: string;
   pingIntervalMs?: number;
   feedOptions?: FeedOptions;
+  pruneFirstDelayMs?: number;
+  pruneIntervalMs?: number;
+  // What the prune runs, for tests
+  prune?: (now: Date) => Promise<unknown>;
 }
 
 export interface Service {
@@ -37,6 +47,9 @@ export function startService({
   distDir,
   pingIntervalMs,
   feedOptions,
+  pruneFirstDelayMs = PRUNE_FIRST_DELAY_MS,
+  pruneIntervalMs = PRUNE_INTERVAL_MS,
+  prune = pruneWhiteboardVersions,
 }: ServiceOptions): Service {
   const http = createHttpHandler({ config, distDir });
   const { upgrade, websocket } = createWebSocketHandler({
@@ -59,6 +72,25 @@ export function startService({
   const boundPort = server.port ?? port;
   const feed = config.feed.enabled ? startFeed(config, feedOptions) : undefined;
   let stopped = false;
+
+  // The timers never keep the process up on their own; a stop clears them,
+  // and a pass under way finishes
+  let pruning: Promise<void> = Promise.resolve();
+  let pruneTimer: ReturnType<typeof setInterval> | undefined;
+  const runPrune = () => {
+    if (stopped) return;
+    pruning = prune(new Date()).then(
+      () => {},
+      (error) => Logger.error("Failed to prune board history", { error }),
+    );
+  };
+  const firstPrune = setTimeout(() => {
+    runPrune();
+    pruneTimer = setInterval(runPrune, pruneIntervalMs);
+    pruneTimer.unref();
+  }, pruneFirstDelayMs);
+  firstPrune.unref();
+
   return {
     server,
     port: boundPort,
@@ -67,6 +99,9 @@ export function startService({
     async stop() {
       if (stopped) return;
       stopped = true;
+      clearTimeout(firstPrune);
+      if (pruneTimer) clearInterval(pruneTimer);
+      await pruning;
       await feed?.stop();
       await closeRooms((member) => member.close(1001, "Service stopping"));
       server.stop(true);

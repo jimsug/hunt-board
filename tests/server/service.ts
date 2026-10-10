@@ -1,7 +1,7 @@
 import type { Claims } from "lib/access";
 import { EJSON } from "lib/compat/ejson";
 import type { ServerMessage, Welcome } from "lib/protocol";
-import type { Service } from "../../server/app";
+import type { Service, ServiceOptions } from "../../server/app";
 import { startService } from "../../server/app";
 import type { Config } from "../../server/config";
 import { signToken } from "../../server/token";
@@ -29,7 +29,7 @@ export const testConfig = (overrides: Partial<Config> = {}): Config => ({
 });
 
 export function startTestService(
-  options: { distDir?: string; pingIntervalMs?: number } = {},
+  options: Omit<ServiceOptions, "config" | "port"> = {},
 ): Service {
   return startService({ config: testConfig(), port: 0, ...options });
 }

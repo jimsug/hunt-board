@@ -39,7 +39,7 @@ bun run dev        # the same, restarting on changes
 bun run dev:client # Vite on :5173, proxying /ws and /boards to the service
 ```
 
-The process serves the HTTP API (`POST /boards`, `DELETE /boards/:id`, `GET /boards/:id/activity` with `Authorization: Bearer <JR_SHARED_SECRET>`; `GET /healthz` open), the websocket on `/ws`, and the built client from `dist/` at `/` and `/boards/:id` (a placeholder page until the client is built). The page is sent with `Content-Security-Policy: frame-ancestors <JR_URL>`.
+The process serves the HTTP API (`POST /boards`, `DELETE /boards/:id`, `GET /boards/:id/activity` with `Authorization: Bearer <JR_SHARED_SECRET>`; `GET /healthz` open), the websocket on `/ws`, and the built client from `dist/` at `/` and `/boards/:id` (a placeholder page until the client is built). It also thins board history (`pruneWhiteboardVersions`) a minute after start and hourly after that. The page is sent with `Content-Security-Policy: frame-ancestors <JR_URL>`.
 
 To look at a board without Jolly Roger: start the service, then `JR_SHARED_SECRET=... bun run scripts/seed-dev.ts` writes the fixture hunt's puzzles and tags, asks for its board and prints two links with tokens (an operator and a member, good for five minutes).
 

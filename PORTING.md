@@ -368,8 +368,11 @@ New, to the service design; nothing here has a Jolly Roger counterpart.
   responses carry nothing about framing. The board url `POST /boards`
   answers is `<PUBLIC_URL>/boards/<id>`; Jolly Roger adds `?token=`.
 - `app.ts` is `startService({ config, port })`: Bun.serve with `/ws`
-  upgraded and everything else routed to the HTTP handler, and a `stop()`
-  that closes every room's sockets (1001) and the server. `main.ts` loads
+  upgraded and everything else routed to the HTTP handler,
+  `pruneWhiteboardVersions` a minute after start and hourly after that
+  (Jolly Roger's cron job; a failed pass is logged and the next runs), and
+  a `stop()` that clears the timers, waits for a pass under way, and closes
+  every room's sockets (1001) and the server. `main.ts` loads
   the config, connects, runs `ensureIndexes`, starts the service and stops
   it on SIGTERM or SIGINT before disconnecting.
 
