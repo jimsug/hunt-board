@@ -1,0 +1,1311 @@
+import { describe, it } from "bun:test";
+import { assert } from "chai";
+import type { WhiteboardEdgeType } from "lib/models/WhiteboardEdges";
+import type { WhiteboardNodeType } from "lib/models/WhiteboardNodes";
+import type { WhiteboardVersionKind } from "lib/models/WhiteboardVersions";
+import {
+  MAX_IMAGES_PER_BOARD,
+  MAX_INK_POINTS_PER_BOARD,
+  MAX_NODES_PER_BOARD,
+  MAX_VERSION_BYTES_PER_BOARD,
+  VERSION_IDLE_MS,
+  VERSION_INTERVAL_MS,
+  VERSION_JOIN_MS,
+  VERSION_KEEP_AFTER_HUNT,
+} from "lib/whiteboard/limits";
+import type {
+  PrunableVersion,
+  RestorePlan,
+  VersionSummary,
+} from "lib/whiteboard/versions";
+import {
+  pickToRestore,
+  planItemRestore,
+  planRestore,
+  restoreItemSet,
+  versionDecision,
+  versionDifferences,
+  versionsToPrune,
+  withFreshInsertIds,
+} from "lib/whiteboard/versions";
+
+const MINUTE = 60 * 1000;
+const HOUR = 60 * MINUTE;
+const now = new Date(Date.UTC(2026, 9, 4, 12, 0, 0));
+const ago = (ms: number) => new Date(now.getTime() - ms);
+
+const base = {
+  hunt: "hunt",
+  board: "board",
+  contributors: [],
+  createdAt: new Date(0),
+  updatedAt: new Date(0),
+  createdBy: "creator",
+};
+const node = (
+  _id: string,
+  fields: Partial<WhiteboardNodeType> = {},
+): WhiteboardNodeType => ({
+  ...base,
+  _id,
+  type: "sticky",
+  position: { x: 0, y: 0 },
+  ...fields,
+});
+const card = (_id: string, puzzle: string, parent?: string) =>
+  node(_id, { type: "puzzle", puzzle, parent });
+const frame = (_id: string, fields: Partial<WhiteboardNodeType> = {}) =>
+  node(_id, { type: "frame", width: 300, height: 200, ...fields });
+// An ink segment with `count` points.
+const ink = (_id: string, count: number) =>
+  node(_id, {
+    type: "ink",
+    stroke: _id,
+    strokeWidth: "thin",
+    points: Array.from({ length: count }, (_, i): [number, number, number] => [
+      i,
+      0,
+      0.5,
+    ]),
+  });
+const edge = (
+  _id: string,
+  source: string,
+  target: string,
+  fields: Partial<WhiteboardEdgeType> = {},
+): WhiteboardEdgeType => ({ ...base, _id, source, target, ...fields });
+
+const insertedIdsOf = (p: RestorePlan) => p.nodes.insert.map((n) => n._id);
+
+describe("whiteboard versions", function () {
+  describe("versionDecision", function () {
+    const version = (
+      _id: string,
+      createdAt: Date,
+      users: [string, Date][],
+      kind: WhiteboardVersionKind = "edits",
+      hash = "a".repeat(64),
+    ): VersionSummary => ({
+      _id,
+      kind,
+      createdAt,
+      users: users.map(([user, at]) => ({ user, at })),
+      hash,
+    });
+    const decide = (
+      versions: VersionSummary[],
+      extra: {
+        user?: string;
+        kind?: WhiteboardVersionKind;
+        lastRewrittenAt?: Date;
+        hash?: string;
+      } = {},
+    ) =>
+      versionDecision({
+        kind: extra.kind ?? "edits",
+        user: extra.user ?? "alice",
+        now,
+        lastRewrittenAt: extra.lastRewrittenAt,
+        versions,
+        hash: extra.hash,
+      });
+
+    it("extends inside the interval", function () {
+      const v = version("v", ago(5 * MINUTE), [["alice", ago(5 * MINUTE)]]);
+      assert.deepEqual(decide([v]), { action: "extend", version: "v" });
+    });
+
+    it("measures the interval from when the user joined, not when the version started", function () {
+      // Started 15 minutes ago by Bob; Alice joined 2 minutes ago, after an
+      // unchanged board
+      const v = version("v", ago(15 * MINUTE), [
+        ["bob", ago(15 * MINUTE)],
+        ["alice", ago(2 * MINUTE)],
+      ]);
+      assert.deepEqual(decide([v]), { action: "extend", version: "v" });
+      assert.deepEqual(decide([v], { user: "bob" }), { action: "serialize" });
+    });
+
+    it("joins a version under a minute old", function () {
+      const v = version("v", ago(VERSION_JOIN_MS - 1000), [
+        ["bob", ago(VERSION_JOIN_MS - 1000)],
+      ]);
+      assert.deepEqual(decide([v]), {
+        action: "join",
+        version: "v",
+        listed: false,
+      });
+      // Someone whose window has run out on it starts it again
+      const listed = version("w", ago(30 * 1000), [
+        ["bob", ago(30 * 1000)],
+        ["alice", ago(VERSION_INTERVAL_MS + 1)],
+      ]);
+      assert.deepEqual(decide([listed]), {
+        action: "join",
+        version: "w",
+        listed: true,
+      });
+      // but not one a minute or more old
+      const old = version("o", ago(VERSION_JOIN_MS), [
+        ["bob", ago(VERSION_JOIN_MS)],
+      ]);
+      assert.deepEqual(decide([old]), { action: "serialize" });
+    });
+
+    it("starts a new one after the interval", function () {
+      const v = version("v", ago(VERSION_INTERVAL_MS), [
+        ["alice", ago(VERSION_INTERVAL_MS)],
+      ]);
+      assert.deepEqual(decide([v]), { action: "serialize" });
+      assert.deepEqual(decide([v], { hash: "b".repeat(64) }), {
+        action: "new",
+      });
+      assert.deepEqual(decide([]), { action: "serialize" });
+      assert.deepEqual(decide([], { hash: "b".repeat(64) }), {
+        action: "new",
+      });
+    });
+
+    it("joins on an equal hash and refreshes the user's time", function () {
+      const v = version("v", ago(HOUR), [
+        ["bob", ago(HOUR)],
+        ["alice", ago(HOUR)],
+      ]);
+      assert.deepEqual(decide([v], { hash: "a".repeat(64) }), {
+        action: "unchanged",
+        version: "v",
+        listed: true,
+      });
+      assert.deepEqual(decide([v], { user: "carol", hash: "a".repeat(64) }), {
+        action: "unchanged",
+        version: "v",
+        listed: false,
+      });
+    });
+
+    it("writes for a reset or restore after an ordinary version", function () {
+      const v = version("v", ago(MINUTE / 2), [["alice", ago(MINUTE / 2)]]);
+      for (const kind of ["reset", "restore"] as const) {
+        assert.deepEqual(decide([v], { kind }), { action: "new" });
+        assert.deepEqual(decide([v], { kind, hash: "a".repeat(64) }), {
+          action: "new",
+        });
+      }
+    });
+
+    it("joins a reset or restore to the same person's one under a minute old", function () {
+      const r = version(
+        "r",
+        ago(VERSION_JOIN_MS - 1000),
+        [["alice", ago(VERSION_JOIN_MS - 1000)]],
+        "restore",
+      );
+      for (const kind of ["reset", "restore"] as const) {
+        assert.deepEqual(decide([r], { kind }), {
+          action: "join",
+          version: "r",
+          listed: true,
+        });
+        // Not someone else's
+        assert.deepEqual(decide([r], { kind, user: "bob" }), {
+          action: "new",
+        });
+      }
+      // Nor once it's a minute old
+      const old = version(
+        "o",
+        ago(VERSION_JOIN_MS),
+        [["alice", ago(VERSION_JOIN_MS)]],
+        "reset",
+      );
+      assert.deepEqual(decide([old], { kind: "restore" }), { action: "new" });
+    });
+
+    it("never extends or joins a reset or restore version, so the first edit after one snapshots", function () {
+      const restore = version(
+        "r",
+        ago(30 * 1000),
+        [["alice", ago(30 * 1000)]],
+        "restore",
+      );
+      // The restore finished just after its version was taken
+      const lastRewrittenAt = ago(29 * 1000);
+      assert.deepEqual(decide([restore], { lastRewrittenAt }), {
+        action: "serialize",
+      });
+      assert.deepEqual(
+        decide([restore], { lastRewrittenAt, hash: "a".repeat(64) }),
+        { action: "new" },
+      );
+      // An ordinary version from before the restore doesn't count either
+      const before = version("b", ago(45 * 1000), [["alice", ago(45 * 1000)]]);
+      assert.deepEqual(decide([before], { lastRewrittenAt }), {
+        action: "serialize",
+      });
+      assert.deepEqual(
+        decide([before], { lastRewrittenAt, hash: "a".repeat(64) }),
+        { action: "new" },
+      );
+    });
+  });
+
+  describe("versionsToPrune", function () {
+    let n = 0;
+    const version = (
+      createdAt: Date,
+      kind: WhiteboardVersionKind = "edits",
+      size = 1000,
+    ): PrunableVersion => {
+      n += 1;
+      return { _id: `v${n}`, kind, createdAt, size };
+    };
+    const prune = (versions: PrunableVersion[], archived = false, at = now) =>
+      versionsToPrune(versions, at, { archived });
+
+    it("keeps everything in the first two hours", function () {
+      const versions = Array.from({ length: 24 }, (_, i) =>
+        version(ago(i * 5 * MINUTE)),
+      );
+      assert.deepEqual(prune(versions), []);
+      assert.deepEqual(prune([]), []);
+    });
+
+    it("keeps the first version each hour", function () {
+      // 09:00 to 09:50, every ten minutes, all over two hours old
+      const hourStart = Date.UTC(2026, 9, 4, 9, 0, 0);
+      const versions = Array.from({ length: 6 }, (_, i) =>
+        version(new Date(hourStart + i * 10 * MINUTE)),
+      );
+      const newest = version(ago(MINUTE));
+      const dropped = prune([...versions, newest]);
+      assert.sameMembers(
+        dropped,
+        versions.slice(1).map((v) => v._id),
+      );
+    });
+
+    it("keeps every reset and restore", function () {
+      const hourStart = Date.UTC(2026, 9, 4, 8, 0, 0);
+      const first = version(new Date(hourStart));
+      const reset = version(new Date(hourStart + 10 * MINUTE), "reset");
+      const edits = version(new Date(hourStart + 20 * MINUTE));
+      const restore = version(new Date(hourStart + 30 * MINUTE), "restore");
+      const dropped = prune([first, reset, edits, restore, version(now)]);
+      assert.deepEqual(dropped, [edits._id]);
+    });
+
+    it("drops past the byte cap", function () {
+      const third = MAX_VERSION_BYTES_PER_BOARD / 2 - 1;
+      const newest = version(ago(MINUTE), "edits", third);
+      const middle = version(ago(2 * MINUTE), "edits", third);
+      const oldest = version(ago(3 * MINUTE), "edits", third);
+      const older = version(ago(4 * MINUTE), "edits", 10);
+      assert.sameMembers(prune([older, oldest, middle, newest]), [
+        oldest._id,
+        older._id,
+      ]);
+      // Resets and restores count towards it like anything else
+      const reset = version(ago(5 * MINUTE), "reset", third);
+      assert.sameMembers(prune([reset, oldest, middle, newest]), [
+        oldest._id,
+        reset._id,
+      ]);
+    });
+
+    it("never drops the newest", function () {
+      const huge = version(ago(MINUTE), "edits", MAX_VERSION_BYTES_PER_BOARD);
+      const big = version(ago(2 * MINUTE), "edits", 10);
+      assert.deepEqual(prune([big, huge]), [big._id]);
+      const alone = version(
+        ago(3 * HOUR),
+        "edits",
+        MAX_VERSION_BYTES_PER_BOARD,
+      );
+      assert.deepEqual(prune([alone]), []);
+    });
+
+    it("thins an archived hunt to the newest ten plus resets and restores", function () {
+      const versions = Array.from({ length: 15 }, (_, i) =>
+        version(ago(i * MINUTE)),
+      );
+      const reset = version(ago(20 * MINUTE), "reset");
+      const restore = version(ago(30 * MINUTE), "restore");
+      const dropped = prune([...versions, reset, restore], true);
+      assert.sameMembers(
+        dropped,
+        versions.slice(VERSION_KEEP_AFTER_HUNT).map((v) => v._id),
+      );
+      // Not archived, all of it is recent enough to keep
+      assert.deepEqual(prune([...versions, reset, restore]), []);
+    });
+
+    it("thins a board idle for two weeks the same way", function () {
+      const versions = Array.from({ length: 12 }, (_, i) =>
+        version(ago(i * MINUTE)),
+      );
+      const reset = version(ago(40 * MINUTE), "reset");
+      const later = new Date(now.getTime() + VERSION_IDLE_MS);
+      const dropped = prune([...versions, reset], false, later);
+      assert.sameMembers(
+        dropped,
+        versions.slice(VERSION_KEEP_AFTER_HUNT).map((v) => v._id),
+      );
+      // A day short of that, it's thinned by the hour instead
+      const sooner = new Date(now.getTime() + VERSION_IDLE_MS - 24 * HOUR);
+      assert.lengthOf(
+        prune([...versions, reset], false, sooner),
+        versions.length - 1,
+      );
+    });
+  });
+
+  describe("planRestore", function () {
+    const plan = (
+      current: { nodes: WhiteboardNodeType[]; edges?: WhiteboardEdgeType[] },
+      target: { nodes: WhiteboardNodeType[]; edges?: WhiteboardEdgeType[] },
+    ): RestorePlan => {
+      const result = planRestore(
+        { nodes: current.nodes, edges: current.edges ?? [] },
+        { nodes: target.nodes, edges: target.edges ?? [] },
+      );
+      assert.isTrue(result.ok);
+      if (!result.ok) throw new Error("refused");
+      return result.plan;
+    };
+    const insertedIds = (p: RestorePlan) => p.nodes.insert.map((n) => n._id);
+
+    it("matches cards by puzzle and remaps references", function () {
+      const live = [frame("liveFrame", { tag: "round" }), card("new", "p1")];
+      const stored = [
+        frame("oldFrame", { tag: "round" }),
+        card("old", "p1", "oldFrame"),
+        node("sticky"),
+      ];
+      const result = plan(
+        { nodes: live },
+        { nodes: stored, edges: [edge("line", "sticky", "old")] },
+      );
+      // Nothing is inserted twice
+      assert.deepEqual(insertedIds(result), ["sticky"]);
+      const cardChange = result.nodes.change.find((c) => c._id === "new");
+      assert.equal(cardChange?.$set.parent, "liveFrame");
+      assert.deepEqual(result.edges.insert, [edge("line", "sticky", "new")]);
+      assert.deepEqual(result.nodes.remove, []);
+    });
+
+    it("matches tag frames and feeder arrows by key", function () {
+      const live = [
+        frame("f2", { tag: "round", label: "Round" }),
+        frame("u2", { frameKind: "ungrouped" }),
+        card("a", "p1", "f2"),
+        card("b", "p2", "f2"),
+      ];
+      const liveEdges = [
+        edge("e2", "a", "b", { auto: true, feeder: "p1", meta: "p2" }),
+      ];
+      const stored = [
+        frame("f1", {
+          tag: "round",
+          label: "Round",
+          position: { x: 50, y: 0 },
+        }),
+        frame("u1", { frameKind: "ungrouped" }),
+        card("a", "p1", "f1"),
+        card("b", "p2", "u1"),
+      ];
+      const storedEdges = [
+        edge("e1", "a", "b", {
+          auto: true,
+          feeder: "p1",
+          meta: "p2",
+          hidden: true,
+        }),
+      ];
+      const result = plan(
+        { nodes: live, edges: liveEdges },
+        { nodes: stored, edges: storedEdges },
+      );
+      assert.deepEqual(insertedIds(result), []);
+      assert.deepEqual(result.edges.insert, []);
+      assert.deepEqual(result.nodes.remove, []);
+      assert.deepEqual(result.edges.remove, []);
+      assert.deepEqual(result.nodes.change.find((c) => c._id === "f2")?.$set, {
+        position: { x: 50, y: 0 },
+      });
+      assert.equal(
+        result.nodes.change.find((c) => c._id === "b")?.$set.parent,
+        "u2",
+      );
+      assert.deepEqual(result.edges.change, [
+        { _id: "e2", $set: { hidden: true }, $unset: {} },
+      ]);
+    });
+
+    it("drops dangling parents, edges and orphan points", function () {
+      const stored = [
+        node("child", { parent: "gone", position: { x: 5, y: 5 } }),
+        node("onSticky", { parent: "child" }),
+        node("pointA", { type: "point" }),
+        node("pointB", { type: "point" }),
+        node("loose", { type: "point" }),
+      ];
+      const result = plan(
+        { nodes: [] },
+        {
+          nodes: stored,
+          edges: [
+            edge("free", "pointA", "pointB"),
+            edge("dangling", "child", "gone"),
+          ],
+        },
+      );
+      const inserted = new Map(result.nodes.insert.map((n) => [n._id, n]));
+      assert.sameMembers(
+        [...inserted.keys()],
+        ["child", "onSticky", "pointA", "pointB"],
+      );
+      // Not in the version, and not a frame, so no parent
+      assert.isUndefined(inserted.get("child")?.parent);
+      assert.isUndefined(inserted.get("onSticky")?.parent);
+      assert.deepEqual(
+        result.edges.insert.map((e) => e._id),
+        ["free"],
+      );
+    });
+
+    it("lifts a looping parent to the top level", function () {
+      const stored = [
+        frame("a", { parent: "b" }),
+        frame("b", { parent: "a" }),
+        node("inside", { parent: "b" }),
+      ];
+      const result = plan({ nodes: [] }, { nodes: stored });
+      const inserted = new Map(result.nodes.insert.map((n) => [n._id, n]));
+      assert.isUndefined(inserted.get("a")?.parent);
+      assert.equal(inserted.get("b")?.parent, "a");
+      assert.equal(inserted.get("inside")?.parent, "b");
+      // Parents first
+      assert.deepEqual(insertedIds(result), ["a", "b", "inside"]);
+    });
+
+    it("keeps cards for puzzles added since", function () {
+      const live = [
+        frame("round", { tag: "t", position: { x: 100, y: 200 } }),
+        card("added", "p9", "round"),
+        node("added-sticky"),
+      ];
+      const result = plan({ nodes: live }, { nodes: [] });
+      assert.sameMembers(result.nodes.remove, ["round", "added-sticky"]);
+      assert.deepEqual(result.nodes.change, [
+        {
+          _id: "added",
+          $set: { position: { x: 100, y: 200 } },
+          $unset: { parent: "", manual: "" },
+        },
+      ]);
+      assert.sameMembers(result.detach, ["round", "added-sticky"]);
+    });
+
+    describe("with deleted puzzles", function () {
+      const both = {
+        nodes: [
+          frame("round", { tag: "t", position: { x: 100, y: 200 } }),
+          card("keptCard", "live", "round"),
+          card("goneCard", "deleted", "round"),
+          node("note"),
+        ],
+        edges: [
+          edge("arrow", "goneCard", "keptCard", {
+            auto: true,
+            feeder: "deleted",
+            meta: "live",
+          }),
+          edge("line", "note", "goneCard"),
+        ],
+      };
+      const restore = (
+        current: { nodes: WhiteboardNodeType[]; edges?: WhiteboardEdgeType[] },
+        target: { nodes: WhiteboardNodeType[]; edges?: WhiteboardEdgeType[] },
+      ) => {
+        const result = planRestore(
+          { nodes: current.nodes, edges: current.edges ?? [] },
+          { nodes: target.nodes, edges: target.edges ?? [] },
+          { livePuzzles: new Set(["live"]) },
+        );
+        assert.isTrue(result.ok);
+        if (!result.ok) throw new Error("refused");
+        return result.plan;
+      };
+
+      it("restores every card when it isn't told which puzzles are live", function () {
+        const result = plan({ nodes: [] }, both);
+        assert.include(insertedIds(result), "goneCard");
+        assert.sameMembers(
+          result.edges.insert.map((e) => e._id),
+          ["arrow", "line"],
+        );
+      });
+
+      it("doesn't put back a card for a deleted puzzle, or its lines", function () {
+        const result = restore({ nodes: [] }, both);
+        assert.sameMembers(insertedIds(result), ["round", "keptCard", "note"]);
+        assert.deepEqual(result.edges.insert, []);
+      });
+
+      it("leaves a deleted puzzle's hidden card where it is if the version has no card for it", function () {
+        const hidden = card("goneCard", "deleted", "round");
+        hidden.hidden = true;
+        hidden.hiddenWithPuzzle = true;
+        hidden.manual = true;
+        const result = restore(
+          { nodes: [both.nodes[0]!, hidden] },
+          { nodes: [both.nodes[0]!] },
+        );
+        assert.deepEqual(result.nodes.change, []);
+        assert.deepEqual(result.nodes.remove, []);
+        assert.deepEqual(result.nodes.insert, []);
+      });
+
+      it("keeps a deleted puzzle's card hidden, where the version had it and with its lines", function () {
+        const hidden = card("goneCard", "deleted", "round");
+        hidden.hidden = true;
+        hidden.hiddenWithPuzzle = true;
+        hidden.manual = true;
+        hidden.position = { x: 10, y: 20 };
+        const line = edge("line", "note", "goneCard");
+        const result = restore(
+          {
+            nodes: [both.nodes[0]!, both.nodes[1]!, hidden, both.nodes[3]!],
+            edges: [line],
+          },
+          both,
+        );
+        assert.deepEqual(insertedIds(result), []);
+        assert.deepEqual(result.nodes.remove, []);
+        assert.deepEqual(result.nodes.change, [
+          {
+            _id: "goneCard",
+            $set: { position: { x: 0, y: 0 } },
+            $unset: { manual: "" },
+          },
+        ]);
+        assert.deepEqual(result.edges.remove, []);
+        assert.deepEqual(result.edges.change, []);
+        // Its feeder arrow comes back hidden with it
+        assert.deepEqual(
+          result.edges.insert.map((e) => [e._id, e.hidden, e.hiddenWithPuzzle]),
+          [["arrow", true, true]],
+        );
+        assert.deepEqual(result.detach, []);
+        assert.deepEqual(result.reattach, []);
+      });
+
+      it("keeps a card the version hid by hand hidden that way", function () {
+        const hidden = card("goneCard", "deleted");
+        hidden.hidden = true;
+        hidden.hiddenWithPuzzle = true;
+        const byHand = card("goneCard", "deleted");
+        byHand.hidden = true;
+        const result = restore({ nodes: [hidden] }, { nodes: [byHand] });
+        assert.deepEqual(result.nodes.change, [
+          { _id: "goneCard", $set: {}, $unset: { hiddenWithPuzzle: "" } },
+        ]);
+      });
+
+      describe("after a replacement", function () {
+        // The version has goneCard for the deleted puzzle, which has since
+        // been handed over to its replacement, "new".
+        const versioned = {
+          nodes: [
+            frame("round", { tag: "t", position: { x: 100, y: 200 } }),
+            {
+              ...card("goneCard", "deleted", "round"),
+              position: { x: 30, y: 40 },
+              manual: true,
+            },
+            card("keptCard", "live"),
+            node("note"),
+          ],
+          edges: [
+            edge("arrow", "goneCard", "keptCard", {
+              auto: true,
+              feeder: "deleted",
+              meta: "live",
+            }),
+            edge("line", "note", "goneCard"),
+          ],
+        };
+        const handedOver = {
+          ...card("goneCard", "new"),
+          position: { x: 500, y: 600 },
+        };
+        const live = {
+          nodes: [handedOver, card("keptCard", "live"), node("note")],
+          edges: [
+            edge("newArrow", "goneCard", "keptCard", {
+              auto: true,
+              feeder: "new",
+              meta: "live",
+            }),
+            edge("line", "note", "goneCard"),
+          ],
+        };
+        const restoreReplaced = (target: typeof versioned) => {
+          const result = planRestore(live, target, {
+            livePuzzles: new Set(["live", "new"]),
+          });
+          assert.isTrue(result.ok);
+          if (!result.ok) throw new Error("refused");
+          return result.plan;
+        };
+
+        it("puts the handed-over card where the version had it, with its lines", function () {
+          const result = restoreReplaced(versioned);
+          assert.sameMembers(insertedIds(result), ["round"]);
+          assert.deepEqual(result.nodes.remove, []);
+          assert.deepEqual(
+            result.nodes.change.filter((c) => c._id === "goneCard"),
+            [
+              {
+                _id: "goneCard",
+                $set: {
+                  position: { x: 30, y: 40 },
+                  parent: "round",
+                  manual: true,
+                },
+                $unset: {},
+              },
+            ],
+          );
+          // The line stays; the deleted puzzle's arrow isn't drawn, and the
+          // replacement's is left to the sync that follows a restore
+          assert.notInclude(result.edges.remove, "line");
+          assert.deepEqual(result.edges.insert, []);
+          assert.deepEqual(result.edges.remove, ["newArrow"]);
+        });
+
+        it("uses the version's own card for the replacement if it has one", function () {
+          const result = restoreReplaced({
+            nodes: [
+              ...versioned.nodes,
+              { ...card("theirCard", "new"), position: { x: 1, y: 2 } },
+            ],
+            edges: versioned.edges,
+          });
+          assert.sameMembers(insertedIds(result), ["round"]);
+          assert.deepEqual(result.nodes.remove, []);
+          const change = result.nodes.change.find((c) => c._id === "goneCard");
+          assert.deepEqual(change?.$set.position, { x: 1, y: 2 });
+          assert.include(result.edges.remove, "line");
+        });
+      });
+
+      it("moves a deleted puzzle's card out of a frame that goes, keeping it hidden", function () {
+        const hidden = card("goneCard", "deleted", "round");
+        hidden.hidden = true;
+        hidden.manual = true;
+        hidden.position = { x: 10, y: 20 };
+        const result = restore(
+          { nodes: [both.nodes[0]!, hidden] },
+          { nodes: [] },
+        );
+        assert.deepEqual(result.nodes.change, [
+          {
+            _id: "goneCard",
+            $set: { position: { x: 110, y: 220 } },
+            $unset: { parent: "" },
+          },
+        ]);
+        assert.deepEqual(result.nodes.remove, ["round"]);
+      });
+
+      it("shows a card and arrow the version hid with a puzzle that's back", function () {
+        const meta = card("metaCard", "live");
+        const back = card("backCard", "back");
+        back.hidden = true;
+        back.hiddenWithPuzzle = true;
+        const arrow = edge("arrow", "backCard", "metaCard", {
+          auto: true,
+          feeder: "back",
+          meta: "live",
+          hidden: true,
+          hiddenWithPuzzle: true,
+        });
+        const result = planRestore(
+          { nodes: [meta], edges: [] },
+          { nodes: [meta, back], edges: [arrow] },
+          { livePuzzles: new Set(["live", "back"]) },
+        );
+        assert.isTrue(result.ok);
+        if (!result.ok) return;
+        const inserted = result.plan.nodes.insert.find(
+          (n) => n._id === "backCard",
+        );
+        assert.isUndefined(inserted?.hidden);
+        assert.isUndefined(inserted?.hiddenWithPuzzle);
+        assert.isUndefined(result.plan.edges.insert[0]?.hidden);
+        assert.isUndefined(result.plan.edges.insert[0]?.hiddenWithPuzzle);
+      });
+    });
+
+    it("leaves unchanged documents alone", function () {
+      const live = [
+        node("same", { updatedAt: new Date(5), text: "hi" }),
+        node("hidden", { hidden: true }),
+        card("c", "p1"),
+      ];
+      const stored = [
+        node("same", { text: "hi" }),
+        node("hidden"),
+        card("c", "p1"),
+      ];
+      const result = plan({ nodes: live }, { nodes: stored });
+      assert.deepEqual(result.nodes.change, [
+        { _id: "hidden", $set: {}, $unset: { hidden: "" } },
+      ]);
+      assert.deepEqual(result.nodes.insert, []);
+      assert.deepEqual(result.nodes.remove, []);
+      assert.deepEqual(result.reattach, [{ node: "hidden", from: ["hidden"] }]);
+      assert.deepEqual(result.detach, []);
+    });
+
+    it("puts back the version's locks, or keeps the board's with keepLocks", function () {
+      const live = [
+        node("lockedNow", { locked: true, lockedBy: "u1" }),
+        node("unlockedNow", { position: { x: 5, y: 0 } }),
+      ];
+      const stored = [
+        node("lockedNow", { position: { x: 9, y: 0 } }),
+        node("unlockedNow", { locked: true, lockedBy: "u2" }),
+        node("back", { locked: true, lockedBy: "u2" }),
+      ];
+
+      const asStored = plan({ nodes: live }, { nodes: stored });
+      assert.sameDeepMembers(asStored.nodes.change, [
+        {
+          _id: "lockedNow",
+          $set: { position: { x: 9, y: 0 } },
+          $unset: { locked: "", lockedBy: "" },
+        },
+        {
+          _id: "unlockedNow",
+          $set: { position: { x: 0, y: 0 }, locked: true, lockedBy: "u2" },
+          $unset: {},
+        },
+      ]);
+      assert.isTrue(asStored.nodes.insert[0]?.locked);
+
+      const result = planRestore(
+        { nodes: live, edges: [] },
+        { nodes: stored, edges: [] },
+        { keepLocks: true },
+      );
+      if (!result.ok) throw new Error("refused");
+      assert.sameDeepMembers(result.plan.nodes.change, [
+        { _id: "lockedNow", $set: { position: { x: 9, y: 0 } }, $unset: {} },
+        {
+          _id: "unlockedNow",
+          $set: { position: { x: 0, y: 0 } },
+          $unset: {},
+        },
+      ]);
+      assert.deepEqual(insertedIds(result.plan), ["back"]);
+      assert.notProperty(result.plan.nodes.insert[0], "locked");
+      assert.notProperty(result.plan.nodes.insert[0], "lockedBy");
+    });
+
+    it("refuses past the node cap", function () {
+      const stored = Array.from({ length: MAX_NODES_PER_BOARD }, (_, i) =>
+        node(`s${i}`),
+      );
+      assert.deepEqual(
+        planRestore(
+          { nodes: [card("kept", "p1")], edges: [] },
+          { nodes: stored, edges: [] },
+        ),
+        { ok: false, reason: "tooBig" },
+      );
+      assert.isTrue(
+        planRestore({ nodes: [], edges: [] }, { nodes: stored, edges: [] }).ok,
+      );
+    });
+
+    it("refuses ink past the budget, unless the board already has more", function () {
+      const over = ink("over", MAX_INK_POINTS_PER_BOARD + 1);
+      const more = ink("more", MAX_INK_POINTS_PER_BOARD + 50);
+      assert.deepEqual(
+        planRestore(
+          { nodes: [ink("small", 10)], edges: [] },
+          { nodes: [over], edges: [] },
+        ),
+        { ok: false, reason: "tooMuchInk" },
+      );
+      assert.isTrue(
+        planRestore(
+          { nodes: [ink("small", 10)], edges: [] },
+          { nodes: [ink("full", MAX_INK_POINTS_PER_BOARD)], edges: [] },
+        ).ok,
+      );
+      // A board already past the budget can still lose ink, but not gain it
+      assert.isTrue(
+        planRestore({ nodes: [more], edges: [] }, { nodes: [over], edges: [] })
+          .ok,
+      );
+      assert.deepEqual(
+        planRestore({ nodes: [over], edges: [] }, { nodes: [more], edges: [] }),
+        { ok: false, reason: "tooMuchInk" },
+      );
+    });
+  });
+
+  describe("withFreshInsertIds", function () {
+    const restorePlan = (): RestorePlan => ({
+      nodes: {
+        remove: ["gone"],
+        change: [
+          { _id: "kept", $set: { parent: "taken" }, $unset: {} },
+          { _id: "other", $set: { text: "taken" }, $unset: {} },
+        ],
+        insert: [frame("taken"), node("child", { parent: "taken" })],
+      },
+      edges: {
+        remove: [],
+        change: [{ _id: "e1", $set: { target: "taken" }, $unset: {} }],
+        insert: [edge("line", "child", "taken"), edge("free", "a", "b")],
+      },
+      detach: ["gone"],
+      reattach: [
+        { node: "taken", from: ["taken", "older"] },
+        { node: "child", from: ["child"] },
+      ],
+    });
+
+    it("leaves a plan with nothing renamed as it is", function () {
+      const p = restorePlan();
+      assert.strictEqual(
+        withFreshInsertIds(p, { nodes: new Map(), edges: new Map() }),
+        p,
+      );
+    });
+
+    it("renames a taken node and every reference to it, and a taken line", function () {
+      const p = withFreshInsertIds(restorePlan(), {
+        nodes: new Map([["taken", "fresh1"]]),
+        edges: new Map([["line", "fresh2"]]),
+      });
+      assert.deepEqual(insertedIdsOf(p), ["fresh1", "child"]);
+      assert.equal(p.nodes.insert[1]!.parent, "fresh1");
+      assert.deepEqual(p.nodes.change[0]!.$set, { parent: "fresh1" });
+      // Only references are renamed, not text that happens to match
+      assert.deepEqual(p.nodes.change[1]!.$set, { text: "taken" });
+      assert.deepEqual(p.edges.change[0]!.$set, { target: "fresh1" });
+      assert.deepEqual(
+        p.edges.insert.map((e) => [e._id, e.source, e.target]),
+        [
+          ["fresh2", "child", "fresh1"],
+          ["free", "a", "b"],
+        ],
+      );
+      // Comments come off the old id, or the new one, which a restore of
+      // the same version may have given it before
+      assert.deepEqual(p.reattach, [
+        { node: "fresh1", from: ["taken", "older", "fresh1"] },
+        { node: "child", from: ["child"] },
+      ]);
+      assert.deepEqual(p.nodes.remove, ["gone"]);
+      assert.deepEqual(p.detach, ["gone"]);
+    });
+  });
+
+  describe("pickToRestore", function () {
+    it("is nothing for no selection and several things", function () {
+      assert.isUndefined(pickToRestore([]));
+      assert.isUndefined(pickToRestore([node("a"), node("b")]));
+      assert.isUndefined(
+        pickToRestore([
+          node("ink1", { type: "ink", stroke: "s" }),
+          node("ink2", { type: "ink", stroke: "t" }),
+        ]),
+      );
+      assert.isUndefined(
+        pickToRestore([
+          node("ink1", { type: "ink", stroke: "s" }),
+          node("sticky"),
+        ]),
+      );
+    });
+
+    it("takes one node, saying whether it's a frame", function () {
+      assert.deepEqual(pickToRestore([node("a")]), {
+        ids: ["a"],
+        frame: false,
+      });
+      assert.deepEqual(pickToRestore([frame("f")]), {
+        ids: ["f"],
+        frame: true,
+      });
+    });
+
+    it("takes every segment of one ink stroke as one pick", function () {
+      assert.deepEqual(
+        pickToRestore([
+          node("ink1", { type: "ink", stroke: "s" }),
+          node("ink2", { type: "ink", stroke: "s" }),
+        ]),
+        { ids: ["ink1", "ink2"], frame: false },
+      );
+    });
+  });
+
+  describe("restoreItemSet", function () {
+    it("brings a frame's contents, a stroke's other segments, their lines and the lines' free ends", function () {
+      const target = {
+        nodes: [
+          frame("round"),
+          frame("inner", { parent: "round" }),
+          node("deep", { parent: "inner" }),
+          node("ink1", { type: "ink", stroke: "s" }),
+          node("ink2", { type: "ink", stroke: "s" }),
+          node("ink3", { type: "ink", stroke: "t" }),
+          node("loose", { type: "point" }),
+          node("elsewhere"),
+        ],
+        edges: [
+          edge("toLoose", "deep", "loose"),
+          edge("unrelated", "elsewhere", "ink3"),
+        ],
+      };
+      const items = restoreItemSet(target, ["round", "ink1"]);
+      assert.sameMembers(
+        [...(items?.nodes ?? [])],
+        ["round", "inner", "deep", "ink1", "ink2", "loose"],
+      );
+      assert.sameMembers([...(items?.edges ?? [])], ["toLoose"]);
+    });
+
+    it("is empty for no ids and undefined for one the version doesn't have", function () {
+      const target = { nodes: [node("a")], edges: [] };
+      assert.deepEqual(restoreItemSet(target, []), {
+        nodes: new Set(),
+        edges: new Set(),
+      });
+      assert.isUndefined(restoreItemSet(target, ["a", "missing"]));
+    });
+  });
+
+  describe("planItemRestore", function () {
+    const planItems = (
+      current: { nodes: WhiteboardNodeType[]; edges?: WhiteboardEdgeType[] },
+      target: { nodes: WhiteboardNodeType[]; edges?: WhiteboardEdgeType[] },
+      ids: string[],
+    ) => {
+      const full = {
+        current: { nodes: current.nodes, edges: current.edges ?? [] },
+        target: { nodes: target.nodes, edges: target.edges ?? [] },
+      };
+      const items = restoreItemSet(full.target, ids);
+      if (!items) throw new Error("not in the version");
+      return planItemRestore(full.current, full.target, items);
+    };
+
+    it("inserts what's gone, updates matches and never removes", function () {
+      const result = planItems(
+        {
+          nodes: [
+            frame("liveFrame", { tag: "round" }),
+            card("newCard", "p1", "liveFrame"),
+            node("added", { parent: "liveFrame" }),
+          ],
+        },
+        {
+          nodes: [
+            frame("oldFrame", { tag: "round", position: { x: 50, y: 0 } }),
+            card("oldCard", "p1"),
+            node("gone", { parent: "oldFrame" }),
+          ],
+        },
+        ["oldFrame", "oldCard"],
+      );
+      assert.isTrue(result.ok);
+      if (!result.ok) return;
+      assert.deepEqual(
+        result.plan.nodes.insert.map((n) => n._id),
+        ["gone"],
+      );
+      assert.equal(result.plan.nodes.insert[0]?.parent, "liveFrame");
+      assert.sameMembers(
+        result.plan.nodes.change.map((c) => c._id),
+        ["liveFrame", "newCard"],
+      );
+      assert.deepEqual(result.plan.nodes.remove, []);
+      assert.deepEqual(result.plan.edges.remove, []);
+      assert.deepEqual(result.puzzles, ["p1"]);
+    });
+
+    it("lifts a node whose frame is gone to where it was on the board", function () {
+      const result = planItems(
+        { nodes: [] },
+        {
+          nodes: [
+            frame("round", { position: { x: 100, y: 200 } }),
+            node("note", { parent: "round", position: { x: 10, y: 20 } }),
+          ],
+        },
+        ["note"],
+      );
+      assert.isTrue(result.ok);
+      if (!result.ok) return;
+      assert.deepEqual(result.plan.nodes.insert, [
+        node("note", { parent: undefined, position: { x: 110, y: 220 } }),
+      ]);
+    });
+
+    it("drops a line whose other end isn't on the board, with its free end", function () {
+      const result = planItems(
+        { nodes: [node("kept")] },
+        {
+          nodes: [
+            node("kept"),
+            node("note"),
+            node("gone"),
+            node("end", { type: "point" }),
+          ],
+          edges: [edge("toGone", "note", "gone"), edge("toEnd", "note", "end")],
+        },
+        ["note"],
+      );
+      assert.isTrue(result.ok);
+      if (!result.ok) return;
+      assert.sameMembers(
+        result.plan.nodes.insert.map((n) => n._id),
+        ["note", "end"],
+      );
+      assert.deepEqual(
+        result.plan.edges.insert.map((e) => e._id),
+        ["toEnd"],
+      );
+    });
+
+    describe("with deleted puzzles", function () {
+      const target = {
+        nodes: [
+          node("note"),
+          { ...card("goneCard", "deleted"), position: { x: 30, y: 40 } },
+          card("keptCard", "live"),
+        ],
+        edges: [
+          edge("toGone", "note", "goneCard"),
+          edge("toKept", "note", "keptCard"),
+        ],
+      };
+      const restoreAll = (current: WhiteboardNodeType[], live: string[]) => {
+        const items = restoreItemSet(target, ["note", "goneCard", "keptCard"]);
+        if (!items) throw new Error("not in the version");
+        const result = planItemRestore(
+          { nodes: current, edges: [] },
+          target,
+          items,
+          { livePuzzles: new Set(live) },
+        );
+        assert.isTrue(result.ok);
+        if (!result.ok) throw new Error("refused");
+        return result;
+      };
+
+      it("doesn't put back a card for a deleted puzzle, or a line to it", function () {
+        const { plan: result, puzzles } = restoreAll([], ["live"]);
+        assert.sameMembers(
+          result.nodes.insert.map((n) => n._id),
+          ["note", "keptCard"],
+        );
+        assert.deepEqual(result.nodes.change, []);
+        assert.deepEqual(
+          result.edges.insert.map((e) => e._id),
+          ["toKept"],
+        );
+        assert.deepEqual(puzzles, ["live"]);
+      });
+
+      it("moves a deleted puzzle's card still on the board, keeping it hidden", function () {
+        const hidden = card("goneCard", "deleted");
+        hidden.hidden = true;
+        hidden.hiddenWithPuzzle = true;
+        const { plan: result } = restoreAll([hidden], ["live"]);
+        assert.sameMembers(
+          result.nodes.insert.map((n) => n._id),
+          ["note", "keptCard"],
+        );
+        assert.deepEqual(result.nodes.change, [
+          { _id: "goneCard", $set: { position: { x: 30, y: 40 } }, $unset: {} },
+        ]);
+        assert.sameMembers(
+          result.edges.insert.map((e) => e._id),
+          ["toGone", "toKept"],
+        );
+        assert.sameMembers(
+          result.reattach.map((r) => r.node),
+          ["keptCard", "note"],
+        );
+      });
+
+      it("moves a card handed over to the deleted puzzle's replacement", function () {
+        const { plan: result, puzzles } = restoreAll(
+          [card("goneCard", "new")],
+          ["live", "new"],
+        );
+        assert.deepEqual(result.nodes.change, [
+          { _id: "goneCard", $set: { position: { x: 30, y: 40 } }, $unset: {} },
+        ]);
+        assert.sameMembers(
+          result.edges.insert.map((e) => e._id),
+          ["toGone", "toKept"],
+        );
+        assert.sameMembers(puzzles, ["live", "new"]);
+      });
+    });
+
+    it("refuses past the node cap", function () {
+      const live = Array.from({ length: MAX_NODES_PER_BOARD }, (_, i) =>
+        node(`s${i}`),
+      );
+      assert.deepEqual(
+        planItems({ nodes: live }, { nodes: [node("new")] }, ["new"]),
+        { ok: false, reason: "tooBig" },
+      );
+    });
+
+    it("refuses past the image cap, but still puts back other nodes", function () {
+      const image = (_id: string) =>
+        node(_id, {
+          type: "image",
+          width: 100,
+          height: 50,
+          image: { url: `https://example.com/${_id}`, width: 200, height: 100 },
+        });
+      const live = Array.from({ length: MAX_IMAGES_PER_BOARD }, (_, i) =>
+        image(`i${i}`),
+      );
+      const version = { nodes: [image("gone"), node("note")] };
+      assert.deepEqual(planItems({ nodes: live }, version, ["gone"]), {
+        ok: false,
+        reason: "tooBig",
+      });
+      assert.isTrue(planItems({ nodes: live }, version, ["note"]).ok);
+      // An image already on the board isn't counted again
+      assert.isTrue(
+        planItems({ nodes: live }, { nodes: [image("i0")] }, ["i0"]).ok,
+      );
+    });
+
+    it("refuses ink past the budget, unless it leaves the board with less", function () {
+      const nearlyFull = ink("big", MAX_INK_POINTS_PER_BOARD - 5);
+      const version = { nodes: [ink("gone", 10), ink("big", 10)] };
+      assert.deepEqual(planItems({ nodes: [nearlyFull] }, version, ["gone"]), {
+        ok: false,
+        reason: "tooMuchInk",
+      });
+      assert.isTrue(
+        planItems({ nodes: [nearlyFull] }, { nodes: [ink("gone", 5)] }, [
+          "gone",
+        ]).ok,
+      );
+      // On a board already past the budget, putting back a stroke as it was
+      // with fewer points is allowed, and adding one isn't
+      const overfull = ink("big", MAX_INK_POINTS_PER_BOARD + 50);
+      assert.isTrue(planItems({ nodes: [overfull] }, version, ["big"]).ok);
+      assert.deepEqual(planItems({ nodes: [overfull] }, version, ["gone"]), {
+        ok: false,
+        reason: "tooMuchInk",
+      });
+    });
+  });
+
+  describe("versionDifferences", function () {
+    it("marks what's missing, moved, restyled or reframed, matching by identity", function () {
+      const live = {
+        nodes: [
+          frame("liveFrame", { tag: "round" }),
+          card("newCard", "p1", "liveFrame"),
+          node("same"),
+          node("moved", { position: { x: 5, y: 0 } }),
+          node("recoloured", { color: "blue" }),
+          node("reframed"),
+        ],
+        edges: [edge("line", "same", "moved", { dashed: true })],
+      };
+      const version = {
+        nodes: [
+          frame("oldFrame", { tag: "round" }),
+          card("oldCard", "p1", "oldFrame"),
+          node("same"),
+          node("moved"),
+          node("recoloured", { color: "pink" }),
+          node("reframed", { parent: "oldFrame" }),
+          node("missing"),
+        ],
+        edges: [
+          edge("line", "same", "moved"),
+          edge("sameLine", "same", "moved"),
+        ],
+      };
+      assert.sameMembers(
+        [...versionDifferences(live, version)],
+        ["moved", "recoloured", "reframed", "missing", "line", "sameLine"],
+      );
+    });
+
+    it("marks a node whose only difference is its lock", function () {
+      const live = {
+        nodes: [node("a", { locked: true, lockedBy: "u1" }), node("b")],
+        edges: [],
+      };
+      const version = { nodes: [node("a"), node("b")], edges: [] };
+      assert.sameMembers([...versionDifferences(live, version)], ["a"]);
+    });
+
+    it("marks a node locked by someone else in the version", function () {
+      const live = {
+        nodes: [
+          node("a", { locked: true, lockedBy: "u1" }),
+          node("b", { locked: true, lockedBy: "u1" }),
+        ],
+        edges: [],
+      };
+      const version = {
+        nodes: [
+          node("a", { locked: true, lockedBy: "u2" }),
+          node("b", { locked: true, lockedBy: "u1" }),
+        ],
+        edges: [],
+      };
+      assert.sameMembers([...versionDifferences(live, version)], ["a"]);
+      assert.equal(versionDifferences(live, version, { locks: false }).size, 0);
+    });
+
+    it("leaves a lock difference unmarked without locks", function () {
+      const live = {
+        nodes: [
+          node("a", { locked: true, lockedBy: "u1" }),
+          node("b", { locked: true, lockedBy: "u1" }),
+        ],
+        edges: [],
+      };
+      const version = {
+        nodes: [node("a"), node("b", { position: { x: 5, y: 0 } })],
+        edges: [],
+      };
+      assert.sameMembers(
+        [...versionDifferences(live, version, { locks: false })],
+        ["b"],
+      );
+    });
+
+    it("finds nothing when the board hasn't changed", function () {
+      const board = {
+        nodes: [node("a"), node("b")],
+        edges: [edge("l", "a", "b")],
+      };
+      assert.equal(versionDifferences(board, board).size, 0);
+    });
+  });
+});
