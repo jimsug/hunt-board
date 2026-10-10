@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, beforeEach, describe, it } from "bun:test";
+import { afterAll, beforeAll, beforeEach, describe, it, spyOn } from "bun:test";
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -7,6 +7,7 @@ import { Random } from "lib/compat/random";
 import WhiteboardNodes from "lib/models/WhiteboardNodes";
 import Whiteboards from "lib/models/Whiteboards";
 import type { Service } from "../../server/app";
+import Logger from "../../server/logger";
 import { closeRooms } from "../../server/rooms";
 import { ensureBoard } from "../../server/whiteboard";
 import {
@@ -15,6 +16,7 @@ import {
   makeUser,
   resetDatabase,
   setUpDatabase,
+  spyOnMethod,
   tearDownDatabase,
 } from "./harness";
 import {
@@ -259,6 +261,47 @@ describe("http", () => {
         (await fetch(url("/assets/../../package.json"))).status,
         404,
       );
+    });
+
+    it("404s a path that isn't valid percent-encoding", async () => {
+      const errors = spyOn(Logger, "error");
+      try {
+        for (const bad of ["/%E0%A4%A", "/assets/%ZZ", "/%"]) {
+          assert.equal((await fetch(url(bad))).status, 404, bad);
+        }
+        assert.equal(errors.mock.calls.length, 0);
+      } finally {
+        errors.mockRestore();
+      }
+    });
+  });
+
+  describe("failures", () => {
+    it("logs the path, not the url, and answers 500", async () => {
+      const errors = spyOn(Logger, "error").mockImplementation(() => {});
+      const find = spyOnMethod(Whiteboards, "findOneAsync").mockRejectedValue(
+        new Error("Mongo went away"),
+      );
+      try {
+        const res = await fetch(url("/boards/abc/activity?token=secret"), {
+          headers: authed(),
+        });
+        assert.equal(res.status, 500);
+        assert.deepEqual(await res.json(), { error: "Internal error" });
+        assert.equal(errors.mock.calls.length, 1);
+        const [message, fields] = errors.mock.calls[0] as [
+          string,
+          Record<string, unknown>,
+        ];
+        assert.equal(message, "An HTTP request failed");
+        assert.equal(fields.pathname, "/boards/abc/activity");
+        assert.equal(fields.method, "GET");
+        assert.notProperty(fields, "url");
+        assert.notInclude(JSON.stringify(fields), "token=secret");
+      } finally {
+        find.mockRestore();
+        errors.mockRestore();
+      }
     });
   });
 

@@ -95,11 +95,16 @@ export function createHttpHandler({ config, distDir = DIST_DIR }: HttpOptions) {
   }
 
   // A file under dist/, or undefined if there's no such file (or the path
-  // tries to leave dist/)
+  // tries to leave dist/, or isn't a path at all)
   async function staticFile(pathname: string) {
-    const relative = path
-      .normalize(decodeURIComponent(pathname))
-      .replace(/^(\.\.(\/|\\|$))+/, "");
+    let decoded: string;
+    try {
+      decoded = decodeURIComponent(pathname);
+    } catch (error) {
+      if (error instanceof URIError) return undefined;
+      throw error;
+    }
+    const relative = path.normalize(decoded).replace(/^(\.\.(\/|\\|$))+/, "");
     const file = path.join(distDir, relative);
     if (!file.startsWith(`${distDir}${path.sep}`)) return undefined;
     const handle = Bun.file(file);
@@ -192,9 +197,10 @@ export function createHttpHandler({ config, distDir = DIST_DIR }: HttpOptions) {
           },
         );
       }
+      // The path alone: the query string may carry a token
       Logger.error("An HTTP request failed", {
         method: req.method,
-        url: req.url,
+        pathname: new URL(req.url).pathname,
         error,
       });
       return json(500, { error: "Internal error" });
