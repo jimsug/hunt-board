@@ -359,11 +359,219 @@ scratch Mongo and wraps a Bun `WebSocket` as `TestClient` (`hello`, `call`,
 `http.test.ts` (15), `ws.test.ts` (26) and `rooms.test.ts` (7) cover what
 the design asks for; 62 cases in all.
 
+## `client/`: the board in the browser
+
+Jolly Roger's whiteboard canvas (`imports/client/components/whiteboard/`,
+the hooks it uses and the few components around it), built with Vite into
+`dist/`, which `server/http.ts` serves at `/boards/:id`. Of the 119 files
+brought across, 88 are byte-identical to their source but for their import
+lines; the rest are listed below with what changed. Every import of a
+Meteor package, a Jolly Roger model or a method goes to a module under
+`client/` or `lib/` that keeps the shape the code expects, so most files
+moved with import changes only.
+
+### Tooling
+
+- `vite.config.ts`: React, the `lib/*` and `client/*` aliases, and a plugin
+  that swaps `lib/db.ts` and `lib/typedModel/userContext.ts` for
+  `client/shims/*.ts` in the browser (the driver, and Node's
+  `AsyncLocalStorage`; the models import both through `Model.ts` and never
+  need them there). The models themselves are untouched. `index.html` is the
+  page; `bun run build` writes `dist/`; `bun run dev:client` runs Vite with
+  `/ws` and `/boards` proxied to the service (the board page itself stays
+  Vite's).
+- `tsconfig.json` adds `jsx: react-jsx`, the `client/*` path and `scripts`.
+  `client/vite-env.d.ts` declares the stylesheet imports itself rather than
+  referencing `vite/client`, whose `ImportMeta` clashes with Bun's.
+- `lib/compat/ejson.ts` does its base64 through binary strings, so the same
+  module runs in the browser; the wire format is unchanged.
+- `client/styled.d.ts` types styled-components' theme as `client/theme.ts`'s
+  `Theme` (Jolly Roger's `types/styled.d.ts`).
+
+### The store (`client/store/`)
+
+In place of Minimongo and `meteor/react-meteor-data`:
+
+- `collection.ts`: `Collection<T>` keyed by `_id`, with `find(selector,
+  { sort, projection | fields, limit, skip })` returning a `Cursor`
+  (`fetch`, `map`, `forEach`, `count`, `observe`, `observeChanges`) and
+  `findOne(id | selector, options)`. Selectors take equality (an array field
+  matches a value in it, as Mongo's does), `$in`, `$nin`, `$ne`, `$exists`,
+  `$gt`/`$gte`/`$lt`/`$lte` on numbers, strings and dates, dotted paths, and
+  `$or`/`$and`/`$nor`; anything else throws. Sorts take several fields with
+  missing values first. A projection copies the named top-level fields
+  (`_id` always); without one the stored object itself is handed back, so
+  identity survives across runs. `set(doc)` with `deleted: true` removes
+  (the change seam's soft deletes); `replaceAll` is a snapshot.
+- `tracker.ts`: `track(fn)` records which collections and cells `fn` read;
+  `Cell<T>` is one reactive value.
+- `useTracker.ts`: `useTracker(fn, deps, skipUpdate?)` on
+  `useSyncExternalStore`: `fn` runs again when anything it read changes or
+  `deps` change, and a result equal by value (`EJSON.equals`) to the last
+  keeps the last, so unchanged documents keep their identity. The third
+  argument is `react-meteor-data`'s comparator (`useRemoteDrags` uses it).
+  `createTrackerStore` is the hook without React, for tests.
+- `collections.ts`: `Whiteboards`, `WhiteboardNodes`, `WhiteboardEdges`,
+  `WhiteboardVersions`, `BoardComments`, `Puzzles` and `Tags`, named as
+  their models are so a `change` message finds its collection, plus
+  `WhiteboardPresence` (one document per other connection, `_id` the
+  connection id, `board` and `name` added, from `presence` and `live`
+  messages; the viewer's own tab is left out as Jolly Roger's publication
+  left it out) and `Users` (`{ _id, displayName }` for everyone seen on the
+  board this session, from the welcome, `presence` and `live`). `applyWelcome`,
+  `applyChange`, `applyLive` and `applyPresence` feed them.
+- `current.ts`: cells for the welcome and the connection's state.
+
+### The session (`client/session.ts`)
+
+Opens the websocket, sends `hello { token, hideInk }`, answers `ping`,
+hands `welcome`, `change`, `live` and `presence` to its handlers, and
+answers `call(name, args)` with a promise settled by `result` or `error`
+(a `ServiceError` with the code and reason; a `null` value reads as
+`undefined`). A dropped socket reconnects with backoff (1 s doubling to 30 s)
+and a fresh hello, whose welcome brings the snapshot again; the close codes
+the server won't take back (4400, 4401, 4403, 4404, 4503) leave it closed,
+and 4401 after the token's `exp` is "expired", which the page shows as
+"Reload to continue". A minute before `exp` it asks for a fresh token, and
+every ten seconds until one comes: by default
+`window.parent.postMessage({ t: "token" }, jrUrl)`, taking a reply
+`{ t: "token", token }` from that origin (`requestToken` and `setToken` for
+anything else). `setHideInk` reopens the socket, since the server reads
+`hideInk` from the hello.
+
+### What stands in for Meteor
+
+- `client/methods.ts`: `TypedCall` objects (`call(args, cb)`,
+  `callPromise(args)`) under the names the methods had
+  (`upsertWhiteboardNodes`, `fetchWhiteboardVersion`, ...), each dropping
+  the `boardId` the Meteor methods wanted, so `boardWrites.ts`,
+  `useWhiteboardUndo.ts` and the rest call them as they did. The comment
+  calls are `postBoardComment`, `editBoardComment`, `deleteBoardComment`,
+  `setBoardCommentResolved` and `reactToBoardComment`. `setWhiteboardLive`
+  sends a `live` frame.
+- `client/compat/meteor.ts`: `Meteor.userId()`, `Meteor.user()`,
+  `Meteor.status()` and `Meteor.absoluteUrl()` over the cells, and
+  `Meteor.Error` as `ServiceError`.
+- `client/compat/router.ts`: `Link` as a plain `<a target="_top">` on the
+  welcome's `jrUrl`, and `useNavigate` setting the top window's location,
+  for links into Jolly Roger (a card's Open puzzle, a feeder's row, a
+  double-clicked card).
+- `client/compat/flags.ts`: `Flags.active(name)` from the welcome's `flags`.
+- `client/access.ts`: the `WhiteboardAccess` and `WhiteboardAccessReason`
+  types from `permission_stubs.ts`.
+- `lib/compat/random` and `lib/compat/ejson` for `meteor/random` and
+  `meteor/ejson`.
+
+### Files changed beyond their imports
+
+- `WhiteboardPage.tsx` (at `client/`): the board page without the puzzle
+  page, chat sidebar, breadcrumb or React Router. Access comes from the
+  welcome (`access`, `mayEdit` off meaning "archived", the board's policy
+  as the reason for "comment"), the operator flag from the welcome, and
+  "offline" from the connection's state; the query string (`?comment=`,
+  `?puzzle=`, `?node=`, `?v=`) is read from the page's own url and cleared
+  with `history.replaceState`. No "create whiteboard" page: a board comes
+  from `POST /boards`, and a closed socket shows why (off, no board, not
+  allowed, expired).
+- `main.tsx`, `i18n.ts`, `app.css`: new. The entry opens the session with
+  `?token=` (taken off the address bar), wires it to the store, and renders
+  in Jolly Roger's theme by the system's colour scheme. i18next runs with
+  no resources, so every string is its inline default, and without HTML
+  escaping (React escapes).
+- `WhiteboardCanvas.tsx`: no `puzzleId` prop (comments are board-keyed), no
+  presence subscription (presence comes with the room), no
+  `PuzzlePeopleProvider`, no hunt name for the download's file name (the
+  service doesn't know it, so a download is "hunt-...").
+- `canvasChrome.tsx`: `PuzzlePeopleProvider` gone with the people.
+- `PuzzleCardNode.tsx`: the people row (who's on a call or has the puzzle
+  open) is gone; a locked puzzle shows as locked from `puzzle.locked` alone
+  (no `allowUnlockablePuzzles` hunt setting, no `lockedSummary` in the copy).
+- `FeedersButton.tsx`: no `lockedSummary`.
+- `CommentComposer.tsx`: a textarea in place of the chat editor. Enter
+  sends, Shift+Enter breaks the line, `@` offers the names of the people
+  seen on the board (those here now first) and completes to the name as
+  text; no mentions, puzzle links or images.
+- `CommentPanel.tsx`: over `BoardComments` and the comment calls; no
+  `huntId`/`puzzleId`, no roles, no Discord avatars; "operator" from the
+  welcome; Escape in the composer is judged on the textarea.
+- `CommentText.tsx` (new, for `ChatMessage`): text as markdown, mentions as
+  `@name`, puzzle links into Jolly Roger; no images or role mentions.
+- `CommentReactions.tsx` (new, for `ChatMessageReactions`): one
+  `comment.react { on }` call per toggle, and a row of eight emoji in place
+  of the emoji-picker-react picker.
+- `CommentLayer.tsx`, `CommentList.tsx`, `useBoardComments.ts`,
+  `useWhiteboardComments.ts`: `BoardComments` types and the board's id in
+  place of chat and the backing puzzle.
+- `useLinkedComment.ts`: "comments loaded" is the welcome having arrived,
+  in place of `ChatLoadedContext`.
+- `EditPolicyModal.tsx`: the people who may edit are a textarea of Jolly
+  Roger user ids, one per line, in place of react-select over the hunt's
+  members (the service knows no names but those seen on the board). No
+  `huntId`, and no "everyone is an operator" note.
+- `HistoryPanel.tsx`: no versions subscription (they come with the
+  snapshot); names from `Users`.
+- `Avatar.tsx`, `AvatarStack.tsx`, `NodeContributors.tsx`,
+  `useAvatarUsers.ts`: initials only; `discordAccount` is gone.
+- `LockBadge.tsx`, `useWhiteboardNames.ts`, `indexedDisplayNames.ts`:
+  `Users` in place of `MeteorUsers`. A name is known only once its owner has
+  been on the board this session; otherwise "Unknown"/"Someone".
+- `CursorLayer.tsx` and `useWhiteboardLive.ts`: the cursor goes every
+  100 ms like a drag (was 200), and each hop on screen glides for the gap
+  since the previous update, clamped to 60 to 250 ms, so a remote cursor
+  doesn't stop between updates.
+- `useImageTool.ts`, `useChatImagesEnabled.ts`, `uploadChatImage.ts`: the
+  Image button stays, disabled while the welcome says `imagesEnabled` is
+  off; `uploadChatImage` fails every upload as "nowhere to store images"
+  until uploads have their workstream, and takes no puzzle id.
+- `useTagSynonyms.ts`: the built-in `TAG_SYNONYMS` (no settings
+  subscription), as the server does.
+- `RelativeTime.tsx`: `window.setTimeout` for `Meteor.setTimeout`.
+- `theme.ts`: `reactSelectTheme` removed with react-select.
+- `search.ts`: the guess matcher dropped (no guesses here).
+- `lib/chatMessagePlainText.ts`, `lib/nodeIsMention.ts`,
+  `lib/nodeIsPuzzle.ts`: over the `BoardComments` content types, without
+  image and role-mention nodes; the firehose form is gone.
+
+Not brought across: `PeopleContext.ts`, `ChatLoadedContext.ts`,
+`ShowOnBoardLink.tsx` (a Jolly Roger page's link into the board),
+`useTypedSubscribe.ts`, `usePuzzleViewers*.ts`, `useMentionableUsers.ts`,
+`useEditorImageUpload.ts`, `useSubscribeDisplayNames.ts`, `FancyEditor`,
+`ReactionPicker`, `ChatMessage`, `ChatMessageReactions`, and the puzzle
+page the board sat in.
+
+Where this leans on the server: `welcome` carries `jrUrl` (from
+`JR_URL`), `imagesEnabled` (false until uploads exist) and `flags` (the
+active flag names), added in `server/ws.ts`.
+
+### Tests (client)
+
+`tests/client/store.test.ts` covers the query operators, sorts, projections,
+`deleted` removal, observe/observeChanges and the tracker store (24 cases
+with `useTracker.test.tsx`, which renders a component under happy-dom and
+sees it re-render on a change and on new deps). `tests/client/session.test.ts`
+(10) runs the session against `tests/server/service.ts`: the welcome and
+its extras, call resolution and refusal by id, live and presence, a
+reconnect with a fresh hello after `closeRooms`, a terminal close, and
+token renewal through `requestToken`.
+
+`scripts/seed-dev.ts` fills a running service with the fixture hunt and
+prints board links with tokens for two made-up people, for looking at the
+client in a browser.
+
 ## Left for later workstreams
 
-- The client under `client/`, built to `dist/`.
 - The feed: `syncPuzzlesOnBoard` and `deferSyncPuzzlesOnBoard` take the
   puzzle ids it mirrors; the `Puzzles` and `Tags` copies are written by it.
 - Image uploads and the signed policy; the `tag.synonyms` setting.
-- The client will need `lib/db.ts` (the only runtime importer of `mongodb`)
-  aliased away when the models are bundled for the browser.
+- Names for people who haven't been on the board this session (a
+  comment's author, a version's editors, who locked a node): the feed or
+  the token could bring them.
+- The edit policy's list of editors as names rather than ids, once the
+  service knows the hunt's members.
+- Jolly Roger's adapter answering `{ t: "token" }` from the frame with a
+  fresh token, and passing `?comment=`, `?puzzle=`, `?node=` and `?v=`
+  through to the iframe's url.
+- Hiding ink leaves ink nodes out of the snapshot altogether (Jolly Roger
+  sent them as outlines without points), so a frame fitted or tidied while
+  ink is hidden doesn't account for hidden strokes.
+- Acceptance: Playwright under Node against `dist/` and a running service.
