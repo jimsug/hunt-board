@@ -16,7 +16,7 @@ import {
   type ServerMessage,
 } from "lib/protocol";
 import { MAX_CLIP_LENGTH } from "lib/whiteboard/clipboard";
-import Flags from "./flags";
+import Flags, { FlagNames } from "./flags";
 import Logger from "./logger";
 import { callMethod } from "./methods";
 import type { Room, RoomMember } from "./rooms";
@@ -53,7 +53,20 @@ export interface SocketData {
 
 export interface WebSocketOptions {
   secret: string;
+  // Jolly Roger's origin, which the welcome carries for links out of the board
+  jrUrl?: string;
   pingIntervalMs?: number;
+}
+
+// What the welcome says about the service itself, beyond the viewer and the
+// board: where Jolly Roger is, whether images can be added (uploads wait for
+// their workstream, so not yet), and which flags are on.
+async function welcomeExtras(jrUrl: string | undefined) {
+  const flags: string[] = [];
+  for (const name of FlagNames) {
+    if (await Flags.activeAsync(name)) flags.push(name);
+  }
+  return { jrUrl, imagesEnabled: false, flags };
 }
 
 type Socket = ServerWebSocket<SocketData>;
@@ -74,6 +87,7 @@ const frameBytes = (frame: string | Buffer) =>
 
 export function createWebSocketHandler({
   secret,
+  jrUrl,
   pingIntervalMs = PING_INTERVAL_MS,
 }: WebSocketOptions) {
   // Puts the request on a socket, or says it isn't a websocket upgrade.
@@ -143,11 +157,13 @@ export function createWebSocketHandler({
       closeSocket(ws, CLOSE_NO_BOARD, "No board for this scope");
       return;
     }
+    const extras = await welcomeExtras(jrUrl);
     const member: RoomMember = {
       id: ws.data.id,
       claims,
       hideInk: message.hideInk ?? false,
-      send: (msg) => send(ws, msg),
+      send: (msg) =>
+        send(ws, msg.t === "welcome" ? { ...msg, ...extras } : msg),
       close: (code, reason) => closeSocket(ws, code, reason),
     };
     try {

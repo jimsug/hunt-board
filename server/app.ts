@@ -34,6 +34,7 @@ export function startService({
   const http = createHttpHandler({ config, distDir });
   const { upgrade, websocket } = createWebSocketHandler({
     secret: config.jrSharedSecret,
+    jrUrl: config.jrUrl,
     pingIntervalMs,
   });
   const server = Bun.serve<SocketData>({

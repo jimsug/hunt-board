@@ -245,6 +245,12 @@ export interface Welcome {
   // Left out when the hello renewed a token on a socket that already had
   // its snapshot
   snapshot?: Snapshot;
+  // Jolly Roger's origin, for links out of the board
+  jrUrl?: string;
+  // Whether images can be added to the board
+  imagesEnabled?: boolean;
+  // The feature flags that are on (disable.whiteboard_live and the like)
+  flags?: string[];
 }
 export interface Change {
   t: "change";
