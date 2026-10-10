@@ -127,7 +127,10 @@ source.
   `check` refused it) without the `boardId`, which is the socket's. The
   `WhiteboardNodeInput`, `WhiteboardEdgeInput` and `CommentAnchorInput`
   types come from it. `comment.react` is `{ messageId, emoji, on }` in place
-  of a reaction message and `removeChatReaction`. `ClaimsSchema` is the
+  of a reaction message and `removeChatReaction`, its `emoji` capped at
+  `MAX_REACTION_LENGTH`; `comment.post` and `comment.edit` cap `text` at
+  `MAX_COMMENT_LENGTH` (both counted in UTF-16 code units, as `.length`
+  does, where Zod's own `max` counts code points). `ClaimsSchema` is the
   token's shape.
 
 ## `lib/models/Whiteboards.ts`
@@ -179,6 +182,13 @@ in-lock guard pairs as the source has them.
   `deleteComment` picks the thread delete for a root and the reply delete
   otherwise. A post needs a pin or a parent (there's no plain chat) and
   text that isn't blank; a parent elsewhere is refused as "is not on board".
+  New here, for the maintainer to confirm: a comment's text is capped at
+  `MAX_COMMENT_LENGTH` (10,000 UTF-16 code units) and a reaction's emoji at
+  `MAX_REACTION_LENGTH` (8, one emoji with its modifiers: a flag or a skin
+  tone is four, a keycap three), both in `lib/whiteboard/limits.ts`, checked
+  by the call schemas and again in `postComment`, `editComment` and
+  `react`. Jolly Roger's chat capped neither; the composer's textarea keeps
+  to the text cap.
   Lock names are `board-comment:` for `chat-message:`. Inserts set
   `createdBy: sender` themselves, where the method context did it. No
   notifications, mentions or images. `UNCOMMENTABLE_TYPES` and

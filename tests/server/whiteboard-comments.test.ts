@@ -5,6 +5,7 @@ import { Random } from "lib/compat/random";
 import BoardComments from "lib/models/BoardComments";
 import WhiteboardNodes from "lib/models/WhiteboardNodes";
 import type { WhiteboardNodeInput } from "lib/protocol";
+import { MAX_COMMENT_LENGTH, MAX_REACTION_LENGTH } from "lib/whiteboard/limits";
 import type { Change } from "../../server/changes";
 import { onChange } from "../../server/changes";
 import {
@@ -369,7 +370,7 @@ describe("whiteboard comments", () => {
     const reactions = () =>
       BoardComments.find({ board: boardId, parentId: root._id }).fetchAsync();
 
-    await rejects(toggle(member, "not an emoji", true), /is an emoji/);
+    await rejects(toggle(member, "nope", true), /is an emoji/);
     await toggle(member, "👍", true);
     await toggle(member, "👍", true);
     await toggle(member, "🎉", true);
@@ -396,6 +397,60 @@ describe("whiteboard comments", () => {
       [member.user, operator.user],
     );
     await rejects(toggle(outsider, "👍", true), /member/);
+  });
+
+  it("caps a comment's text and a reaction's emoji", async () => {
+    const anchor = { x: 0, y: 0 };
+    const longest = "x".repeat(MAX_COMMENT_LENGTH);
+    const tooLong = `${longest}x`;
+    const post = (text: string) =>
+      call("comment.post", member, boardId, { text, anchor });
+    const root = await BoardComments.findOneAsync(
+      (await post(longest)) as string,
+    );
+    assert.isOk(root);
+    await rejects(post(tooLong), /Match error/);
+    // The schema caught that; the method keeps the same line for a caller
+    // that didn't come through it
+    await rejects(
+      postComment(member, boardId, { text: tooLong, anchor }),
+      /longer than/,
+    );
+
+    const edit = (text: string) =>
+      call("comment.edit", member, boardId, { messageId: root!._id, text });
+    await edit(longest);
+    await rejects(edit(tooLong), /Match error/);
+    await rejects(
+      editComment(member, boardId, root!._id, tooLong),
+      /longer than/,
+    );
+
+    const toggle = (emoji: string) =>
+      call("comment.react", member, boardId, {
+        messageId: root!._id,
+        emoji,
+        on: true,
+      });
+    // A flag and a skin tone are four code units each, a keycap three
+    for (const emoji of ["🇦🇺", "👍🏽", "1️⃣"]) {
+      assert.isAtMost(emoji.length, MAX_REACTION_LENGTH);
+      await toggle(emoji);
+    }
+    const tooMany = "👍🏽👍🏽👍";
+    assert.isAbove(tooMany.length, MAX_REACTION_LENGTH);
+    await rejects(toggle(tooMany), /Match error/);
+    await rejects(
+      react(member, boardId, root!._id, tooMany, true),
+      /is an emoji/,
+    );
+    assert.equal(
+      await BoardComments.find({
+        board: boardId,
+        parentId: root!._id,
+      }).countAsync(),
+      3,
+    );
   });
 
   it("leaves comments where they were when their node is deleted", async () => {

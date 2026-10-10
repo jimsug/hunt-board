@@ -11,6 +11,7 @@ import {
   WhiteboardStrokeWidths,
 } from "./models/WhiteboardNodes";
 import { WhiteboardEditPolicies } from "./models/Whiteboards";
+import { MAX_COMMENT_LENGTH, MAX_REACTION_LENGTH } from "./whiteboard/limits";
 
 // The argument shapes of every call a client can make, one schema per call,
 // shared with the client for typing. They mirror the check() patterns the
@@ -24,6 +25,13 @@ const point = z.strictObject({ x: z.number(), y: z.number() });
 export const InkPoint = z.tuple([z.number(), z.number(), z.number()]);
 
 const Ids = z.string().array();
+
+// A string of at most max UTF-16 code units (what .length and a textarea's
+// maxLength count; Zod's own max counts code points)
+const atMost = (max: number) =>
+  z.string().refine((text) => text.length <= max, {
+    message: `Too long: at most ${max} characters`,
+  });
 
 // Creates or updates nodes on a board. New nodes carry a client-generated _id
 // so the client can refer to them before the server echoes them back. Fields
@@ -150,11 +158,14 @@ export const Protocol = {
   setLayoutLocked: z.strictObject({ locked: z.boolean() }),
   // A new comment pinned at anchor, or a reply (at any depth) to parentId
   "comment.post": z.strictObject({
-    text: z.string(),
+    text: atMost(MAX_COMMENT_LENGTH),
     parentId: z.string().optional(),
     anchor: CommentAnchorInput.optional(),
   }),
-  "comment.edit": z.strictObject({ messageId: z.string(), text: z.string() }),
+  "comment.edit": z.strictObject({
+    messageId: z.string(),
+    text: atMost(MAX_COMMENT_LENGTH),
+  }),
   // A root comment goes with its whole thread; a reply is emptied in place
   "comment.delete": z.strictObject({ messageId: z.string() }),
   "comment.resolve": z.strictObject({
@@ -164,7 +175,7 @@ export const Protocol = {
   // on adds the caller's reaction with that emoji (once), off takes it back
   "comment.react": z.strictObject({
     messageId: z.string(),
-    emoji: z.string(),
+    emoji: atMost(MAX_REACTION_LENGTH),
     on: z.boolean(),
   }),
   live: Live,

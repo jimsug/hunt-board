@@ -8,6 +8,11 @@ export const MAX_IMAGES_PER_BOARD = 100;
 export const MAX_EDGES_PER_BOARD = 3000;
 export const MAX_TEXT_LENGTH = 2000;
 export const MAX_LABEL_LENGTH = 200;
+// A comment or reply's text, and a reaction's emoji (one emoji with its
+// modifiers: a flag or a skin tone is four UTF-16 code units, a keycap
+// three). Jolly Roger's chat capped neither.
+export const MAX_COMMENT_LENGTH = 10_000;
+export const MAX_REACTION_LENGTH = 8;
 export const MAX_INK_POINTS = 500;
 // All the ink on a board, counted in points once each stroke is simplified
 // (about 6 MB).

@@ -1,4 +1,5 @@
 import { Users, useTracker, WhiteboardPresence } from "client/store";
+import { MAX_COMMENT_LENGTH } from "lib/whiteboard/limits";
 import React, {
   useCallback,
   useEffect,
@@ -249,6 +250,7 @@ const CommentComposer = ({
           $compact={compact}
           rows={2}
           value={text}
+          maxLength={MAX_COMMENT_LENGTH}
           placeholder={placeholder}
           aria-label={placeholder}
           aria-autocomplete="list"

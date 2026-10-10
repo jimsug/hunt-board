@@ -7,6 +7,7 @@ import BoardComments, { contentFromMessage } from "lib/models/BoardComments";
 import WhiteboardNodes from "lib/models/WhiteboardNodes";
 import nodeIsText from "lib/nodeIsText";
 import type { CommentAnchorInput } from "lib/protocol";
+import { MAX_COMMENT_LENGTH, MAX_REACTION_LENGTH } from "lib/whiteboard/limits";
 import { assertCoordinate, UNCOMMENTABLE_TYPES } from "./whiteboardEdits";
 import { assertMayCommentOnBoard } from "./whiteboardShared";
 import withLock from "./withLock";
@@ -59,6 +60,17 @@ const isBlank = (content: BoardCommentContentType) =>
   content.children.every(
     (child) => nodeIsText(child) && child.text.trim() === "",
   );
+
+// The schema refuses a longer text on the way in; this is for a caller
+// that didn't come through it.
+function assertCommentLength(text: string) {
+  if (text.length > MAX_COMMENT_LENGTH) {
+    throw new ServiceError(
+      400,
+      `A comment can't be longer than ${MAX_COMMENT_LENGTH} characters`,
+    );
+  }
+}
 
 // Writes a message to the board, as sendChatMessageInternal did: a reply at
 // any depth belongs to its thread, a reaction lands once per emoji per
@@ -187,6 +199,7 @@ export async function postComment(
     anchor,
   }: { text: string; parentId?: string; anchor?: CommentAnchorInput },
 ) {
+  assertCommentLength(text);
   const content = contentFromMessage(text);
   if (isBlank(content)) {
     throw new ServiceError(400, "A comment can't be empty");
@@ -223,7 +236,10 @@ export async function react(
   on: boolean,
 ) {
   const content = contentFromMessage(emoji);
-  if (!isReaction({ content, parentId: messageId })) {
+  if (
+    emoji.length > MAX_REACTION_LENGTH ||
+    !isReaction({ content, parentId: messageId })
+  ) {
     throw new ServiceError(400, "A reaction is an emoji");
   }
   if (on) {
@@ -279,6 +295,7 @@ export async function editComment(
   // needs a board that can still be commented on, as a new reply does
   await assertMayCommentOnBoard(claims, boardId);
 
+  assertCommentLength(text);
   const contentObj = contentFromMessage(text);
   if (isBlank(contentObj)) {
     throw new ServiceError(400, "A message can't be edited to nothing");
