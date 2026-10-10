@@ -50,7 +50,14 @@
         "organizeImports": {
           "level": "on",
           "options": {
-            "groups": [":BUN:", ":NODE:", ":PACKAGE:", "lib/**", ":PATH:"]
+            "groups": [
+              ":BUN:",
+              ":NODE:",
+              ":PACKAGE:",
+              "lib/**",
+              "client/**",
+              ":PATH:"
+            ]
           }
         }
       }

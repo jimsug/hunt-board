@@ -30,9 +30,17 @@ const isPlainObject = (value: unknown): value is Record<string, unknown> =>
 const hasOwn = (obj: object, key: string) =>
   Object.prototype.hasOwnProperty.call(obj, key);
 
-const toBase64 = (bytes: Uint8Array) => Buffer.from(bytes).toString("base64");
+// Through binary strings rather than Buffer, so the same module runs in the
+// browser.
+const toBase64 = (bytes: Uint8Array) => {
+  let binary = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  }
+  return btoa(binary);
+};
 const fromBase64 = (text: string) =>
-  new Uint8Array(Buffer.from(text, "base64"));
+  Uint8Array.from(atob(text), (c) => c.charCodeAt(0));
 
 const builtinConverters: Converter[] = [
   {

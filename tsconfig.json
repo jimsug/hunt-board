@@ -5,7 +5,6 @@
     "lib": ["esnext", "dom"],
     "noEmit": true,
     "allowImportingTsExtensions": true,
-
     "strict": true,
     "strictNullChecks": true,
     "strictBindCallApply": true,
@@ -18,14 +17,15 @@
     "noFallthroughCasesInSwitch": true,
     "noImplicitThis": true,
     "noUncheckedIndexedAccess": true,
-
     "moduleResolution": "bundler",
     "resolveJsonModule": true,
     "types": ["bun"],
     "esModuleInterop": true,
     "paths": {
-      "lib/*": ["./lib/*"]
-    }
+      "lib/*": ["./lib/*"],
+      "client/*": ["./client/*"]
+    },
+    "jsx": "react-jsx"
   },
-  "include": ["lib", "server", "client", "tests"]
+  "include": ["lib", "server", "client", "tests", "scripts"]
 }
