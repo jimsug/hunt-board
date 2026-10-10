@@ -1,0 +1,897 @@
+import type { BoardScope } from "lib/access";
+import { SERVICE_USER } from "lib/access";
+import { ServiceError } from "lib/compat/error";
+import { Random } from "lib/compat/random";
+import BoardComments from "lib/models/BoardComments";
+import type { PuzzleType } from "lib/models/Puzzles";
+import Puzzles from "lib/models/Puzzles";
+import type { TagType } from "lib/models/Tags";
+import Tags from "lib/models/Tags";
+import WhiteboardEdges from "lib/models/WhiteboardEdges";
+import type { WhiteboardNodeType } from "lib/models/WhiteboardNodes";
+import WhiteboardNodes from "lib/models/WhiteboardNodes";
+import type { WhiteboardType } from "lib/models/Whiteboards";
+import Whiteboards from "lib/models/Whiteboards";
+import WhiteboardVersions from "lib/models/WhiteboardVersions";
+import { ancestorsOf } from "lib/whiteboard/arrange";
+import type { Rect, SeedNode, Size } from "lib/whiteboard/layout";
+import {
+  CARD_HEIGHT,
+  CARD_WIDTH,
+  chooseFrameForPuzzle,
+  computeFeederPairs,
+  frameLabelForTag,
+  growToContain,
+  isMetaForTag,
+  limitFeedersPerMeta,
+  MIN_FRAME_HEIGHT,
+  MIN_FRAME_WIDTH,
+  placeIntoFrame,
+  roundMetas,
+  roundTags,
+  seedLayout,
+  topLevelSlot,
+} from "lib/whiteboard/layout";
+import {
+  MAX_EDGES_PER_BOARD,
+  MAX_FEEDERS_PER_META,
+  MAX_NODES_PER_BOARD,
+} from "lib/whiteboard/limits";
+import Flags from "./flags";
+import ignoringDuplicateKeyErrors, {
+  isDuplicateKeyError,
+} from "./ignoringDuplicateKeyErrors";
+import Logger from "./logger";
+import WhiteboardVersionChunks from "./models/WhiteboardVersionChunks";
+import currentTagSynonyms from "./tagSynonyms";
+import { detachComments, reattachComments } from "./whiteboardComments";
+import withLock, { renewEvery } from "./withLock";
+
+export async function assertWhiteboardEnabled() {
+  if (await Flags.activeAsync("disable.whiteboard")) {
+    throw new ServiceError(403, "The whiteboard is disabled");
+  }
+}
+
+// Stored as the Ungrouped frame's label. Jolly Roger put it in the server's
+// language; the service has only the one.
+export const ungroupedLabel = () => "Ungrouped";
+
+// The hunt's own board, the one placement keeps up to date, as opposed to a
+// puzzle's.
+export const huntBoardSelector = (huntId: string) =>
+  ({ hunt: huntId, puzzle: { $exists: false } }) as const;
+
+const scopeSelector = (scope: BoardScope) =>
+  scope.puzzle
+    ? ({ hunt: scope.hunt, puzzle: scope.puzzle } as const)
+    : huntBoardSelector(scope.hunt);
+
+// Placement never reads ink, text or attribution, which are most of a busy
+// board.
+export const PLACEMENT_PROJECTION = {
+  points: 0,
+  contributors: 0,
+  text: 0,
+  label: 0,
+} as const;
+
+function nodeRect(node: WhiteboardNodeType): Rect {
+  return {
+    ...node.position,
+    width: node.width ?? CARD_WIDTH,
+    height: node.height ?? CARD_HEIGHT,
+  };
+}
+
+// Grows each ancestor of a node so it still contains the node. Each frame is
+// grown at most once, so frames that racing moves have left inside each other
+// can't keep growing each other forever.
+async function growAncestors(
+  node: WhiteboardNodeType,
+  size: Size,
+  nodesById: Map<string, WhiteboardNodeType>,
+) {
+  let child: WhiteboardNodeType = {
+    ...node,
+    width: size.width,
+    height: size.height,
+  };
+  const seen = new Set([node._id]);
+  let parent = child.parent && nodesById.get(child.parent);
+  while (parent && !seen.has(parent._id)) {
+    seen.add(parent._id);
+    const current = {
+      width: parent.width ?? MIN_FRAME_WIDTH,
+      height: parent.height ?? MIN_FRAME_HEIGHT,
+    };
+    const grown = growToContain(current, nodeRect(child));
+    if (grown.width === current.width && grown.height === current.height) {
+      return;
+    }
+    await WhiteboardNodes.updateAsync(parent._id, {
+      $set: { width: grown.width, height: grown.height },
+    });
+    const updated = { ...parent, ...grown };
+    nodesById.set(updated._id, updated);
+    child = updated;
+    parent = child.parent && nodesById.get(child.parent);
+  }
+}
+
+// Adds a frame below everything on the board, unless the board is full, when
+// the puzzle it was for goes at the top level instead.
+async function insertTopLevelFrame(
+  board: WhiteboardType,
+  nodes: WhiteboardNodeType[],
+  frame: Pick<WhiteboardNodeType, "frameKind" | "tag" | "label">,
+  createdBy: string,
+) {
+  const count = await WhiteboardNodes.find({ board: board._id }).countAsync();
+  if (count + 1 > MAX_NODES_PER_BOARD) {
+    Logger.warn("Not adding a frame to a full whiteboard", {
+      board: board._id,
+      tag: frame.tag,
+    });
+    return undefined;
+  }
+  const topLevel = nodes.filter((n) => !n.parent && !n.hidden).map(nodeRect);
+  const _id = await WhiteboardNodes.insertAsync({
+    hunt: board.hunt,
+    board: board._id,
+    type: "frame",
+    position: topLevelSlot(topLevel),
+    width: MIN_FRAME_WIDTH,
+    height: MIN_FRAME_HEIGHT,
+    ...frame,
+    createdBy,
+  });
+  // Read back for the fields the model fills in. Should it already be gone,
+  // the puzzle is placed as though there were no frame.
+  return WhiteboardNodes.findOneAsync(_id);
+}
+
+// Places one puzzle of a batch. nodesById is the board as the batch read it,
+// and is kept up to date with what this writes, for the puzzles after it.
+// metaPuzzles are the hunt's puzzles with a meta-for: tag, which tell which
+// cards in a frame are its round's metas.
+async function placePuzzle(
+  board: WhiteboardType,
+  puzzle: PuzzleType,
+  tags: TagType[],
+  nodesById: Map<string, WhiteboardNodeType>,
+  metaPuzzles: Pick<PuzzleType, "_id" | "tags">[],
+) {
+  const nodes = [...nodesById.values()];
+  const card = nodes.find((n) => n.puzzle === puzzle._id);
+  if (card?.hidden || card?.manual) return;
+
+  const frames = nodes.filter((n) => n.type === "frame");
+  const visibleFrames = frames.filter((f) => !f.hidden);
+  const choice = chooseFrameForPuzzle(
+    puzzle,
+    tags,
+    visibleFrames.map((f) => ({
+      id: f._id,
+      tag: f.tag,
+      depth: ancestorsOf(nodesById, f._id).length,
+    })),
+    currentTagSynonyms(),
+  );
+
+  let frame: WhiteboardNodeType | undefined;
+  if ("frameId" in choice) {
+    frame = nodesById.get(choice.frameId);
+  } else if (
+    "createForTag" in choice &&
+    // Someone removed this group's frame; don't bring it back.
+    !frames.some((f) => f.tag === choice.createForTag._id)
+  ) {
+    frame = await insertTopLevelFrame(
+      board,
+      nodes,
+      {
+        frameKind: "group",
+        tag: choice.createForTag._id,
+        label: frameLabelForTag(choice.createForTag),
+      },
+      puzzle.createdBy,
+    );
+  } else {
+    frame = visibleFrames.find((f) => f.frameKind === "ungrouped");
+    if (!frame && !frames.some((f) => f.frameKind === "ungrouped")) {
+      frame = await insertTopLevelFrame(
+        board,
+        nodes,
+        { frameKind: "ungrouped", label: ungroupedLabel() },
+        puzzle.createdBy,
+      );
+    }
+  }
+  if (frame) nodesById.set(frame._id, frame);
+
+  if (card && frame && card.parent === frame._id) return;
+  if (card && !frame && !card.parent) return;
+
+  let position;
+  if (frame) {
+    // A meta goes wherever there's room; anything else keeps out of a row
+    // that only the round's metas are in.
+    const placingMeta = roundMetas(frame.tag, tags, [puzzle]).has(puzzle._id);
+    const metas = placingMeta
+      ? new Set<string>()
+      : roundMetas(frame.tag, tags, metaPuzzles);
+    const occupied = nodes
+      .filter((n) => n.parent === frame._id && !n.hidden && n !== card)
+      .map((n) =>
+        Object.assign(nodeRect(n), {
+          meta: !!n.puzzle && metas.has(n.puzzle),
+        }),
+      );
+    const placed = placeIntoFrame(
+      {
+        width: frame.width ?? MIN_FRAME_WIDTH,
+        height: frame.height ?? MIN_FRAME_HEIGHT,
+      },
+      occupied,
+    );
+    position = placed.position;
+    if (
+      placed.frame.width !== frame.width ||
+      placed.frame.height !== frame.height
+    ) {
+      await WhiteboardNodes.updateAsync(frame._id, {
+        $set: { width: placed.frame.width, height: placed.frame.height },
+      });
+      nodesById.set(frame._id, { ...frame, ...placed.frame });
+      await growAncestors(frame, placed.frame, nodesById);
+    }
+  } else {
+    position = topLevelSlot(
+      nodes.filter((n) => !n.parent && !n.hidden && n !== card).map(nodeRect),
+    );
+  }
+
+  if (card) {
+    // Someone may have moved or removed the card since it was read, and
+    // placement never moves a card a person has touched.
+    await WhiteboardNodes.updateAsync(
+      { _id: card._id, manual: { $ne: true }, hidden: { $ne: true } },
+      {
+        $set: { position, ...(frame ? { parent: frame._id } : {}) },
+        ...(frame ? {} : { $unset: { parent: "" } }),
+      },
+    );
+  } else {
+    // Someone may have put the card on the board by hand since it was read.
+    await ignoringDuplicateKeyErrors(() =>
+      WhiteboardNodes.insertAsync({
+        hunt: board.hunt,
+        board: board._id,
+        type: "puzzle",
+        puzzle: puzzle._id,
+        parent: frame?._id,
+        position,
+        width: CARD_WIDTH,
+        height: CARD_HEIGHT,
+        createdBy: puzzle.createdBy,
+      }),
+    );
+  }
+
+  // The card as it is now, whether this moved it or someone else just did
+  const placedCard = await WhiteboardNodes.findOneAsync(
+    { board: board._id, puzzle: puzzle._id },
+    { projection: PLACEMENT_PROJECTION },
+  );
+  if (placedCard) nodesById.set(placedCard._id, placedCard);
+}
+
+// How many arrows syncAutoEdges draws between renewals of the board's lock.
+const ARROWS_PER_RENEWAL = 100;
+
+// Redraws the feeder arrows to and from a batch of puzzles. Arrows to or
+// from deleted puzzles in the batch (deleted), or any other deleted puzzle,
+// are hidden rather than removed, and come back once both ends are live
+// again. A meta gets arrows from at most MAX_FEEDERS_PER_META feeders, and
+// new arrows stop once the board has MAX_EDGES_PER_BOARD lines. Only for
+// callers holding the board's lock, whose renew this calls as it draws.
+export async function syncAutoEdges(
+  board: WhiteboardType,
+  batch: PuzzleType[],
+  tags: TagType[],
+  renew: () => Promise<void>,
+  deleted: string[] = [],
+) {
+  if (batch.length === 0 && deleted.length === 0) return;
+  const batchById = new Map(batch.map((p) => [p._id, p]));
+  const cards = await WhiteboardNodes.find(
+    { board: board._id, type: "puzzle" },
+    { projection: { puzzle: 1 } },
+  ).fetchAsync();
+  const cardsByPuzzle = new Map(
+    cards.flatMap((c) => (c.puzzle ? [[c.puzzle, c] as const] : [])),
+  );
+  // Only their tags, which is all feeder pairs need, and when they were
+  // created, which says which feeders a meta with too many keeps
+  const puzzles = await Puzzles.find(
+    { hunt: board.hunt, _id: { $in: [...cardsByPuzzle.keys()] } },
+    { projection: { tags: 1, createdAt: 1 } },
+  ).fetchAsync();
+
+  const { pairs, overLimit } = limitFeedersPerMeta(
+    computeFeederPairs(puzzles, tags),
+    puzzles,
+  );
+  if (overLimit.length > 0) {
+    Logger.warn("Some metas have too many feeders to draw arrows from all", {
+      board: board._id,
+      metas: overLimit.join(","),
+      limit: MAX_FEEDERS_PER_META,
+    });
+  }
+  const wanted = pairs.filter(
+    (p) => batchById.has(p.feeder) || batchById.has(p.meta),
+  );
+  const wantedKeys = new Set(wanted.map((p) => `${p.feeder}:${p.meta}`));
+  const batchIds = [...batchById.keys(), ...deleted];
+  const existing = await WhiteboardEdges.find({
+    board: board._id,
+    auto: true,
+    $or: [{ feeder: { $in: batchIds } }, { meta: { $in: batchIds } }],
+  }).fetchAsync();
+  const existingKeys = new Set(existing.map((e) => `${e.feeder}:${e.meta}`));
+
+  const live = new Set(puzzles.map((p) => p._id));
+  const notLive = [
+    ...new Set(
+      existing.flatMap((e) =>
+        [e.feeder, e.meta].filter((id): id is string => !!id && !live.has(id)),
+      ),
+    ),
+  ];
+  const deletedEnds = new Set(
+    notLive.length > 0
+      ? await Puzzles.findDeleted(
+          { hunt: board.hunt, _id: { $in: notLive } },
+          { projection: { _id: 1 } },
+        ).mapAsync((p) => p._id)
+      : [],
+  );
+  const toDeleted = (e: (typeof existing)[number]) =>
+    deletedEnds.has(e.feeder ?? "") || deletedEnds.has(e.meta ?? "");
+
+  const hide = existing.filter((e) => toDeleted(e) && !e.hidden);
+  if (hide.length > 0) {
+    await WhiteboardEdges.updateAsync(
+      { _id: { $in: hide.map((e) => e._id) } },
+      { $set: { hidden: true, hiddenWithPuzzle: true } },
+      { multi: true },
+    );
+  }
+  const show = existing.filter(
+    (e) =>
+      !toDeleted(e) &&
+      e.hiddenWithPuzzle &&
+      wantedKeys.has(`${e.feeder}:${e.meta}`),
+  );
+  if (show.length > 0) {
+    await WhiteboardEdges.updateAsync(
+      { _id: { $in: show.map((e) => e._id) } },
+      { $unset: { hidden: "", hiddenWithPuzzle: "" } },
+      { multi: true },
+    );
+  }
+  // Only an arrow to or from a live puzzle in the batch can be stale. One
+  // found only through deleted may be to a puzzle brought back since this
+  // sync read it, which the sync the undelete queues sees to.
+  const stale = existing.filter(
+    (e) =>
+      !toDeleted(e) &&
+      (batchById.has(e.feeder ?? "") || batchById.has(e.meta ?? "")) &&
+      !wantedKeys.has(`${e.feeder}:${e.meta}`),
+  );
+  if (stale.length > 0) {
+    await WhiteboardEdges.removeAsync({
+      _id: { $in: stale.map((e) => e._id) },
+    });
+  }
+
+  let room =
+    MAX_EDGES_PER_BOARD -
+    (await WhiteboardEdges.find({ board: board._id }).countAsync());
+  const drew = renewEvery(renew, ARROWS_PER_RENEWAL);
+  let skipped = 0;
+  for (const pair of wanted) {
+    if (existingKeys.has(`${pair.feeder}:${pair.meta}`)) continue;
+    const source = cardsByPuzzle.get(pair.feeder);
+    const target = cardsByPuzzle.get(pair.meta);
+    const drawnFor = batchById.get(pair.feeder) ?? batchById.get(pair.meta);
+    if (!source || !target || !drawnFor) continue;
+    if (room <= 0) {
+      skipped += 1;
+      continue;
+    }
+    room -= 1;
+    await drew();
+    // Only a sync that outlasted the board's lock can have drawn it since.
+    await ignoringDuplicateKeyErrors(() =>
+      WhiteboardEdges.insertAsync({
+        hunt: board.hunt,
+        board: board._id,
+        source: source._id,
+        target: target._id,
+        auto: true,
+        feeder: pair.feeder,
+        meta: pair.meta,
+        createdBy: drawnFor.createdBy,
+      }),
+    );
+  }
+  if (skipped > 0) {
+    Logger.warn("Not drawing feeder arrows on a whiteboard with no room", {
+      board: board._id,
+      skipped,
+      limit: MAX_EDGES_PER_BOARD,
+    });
+  }
+}
+
+const cardOf = (nodesById: Map<string, WhiteboardNodeType>, puzzle: string) =>
+  [...nodesById.values()].find((n) => n.puzzle === puzzle);
+
+// Moves the lines, comment pins and free pins that came off one card (from)
+// onto another (to).
+async function moveOntoCard(board: WhiteboardType, from: string, to: string) {
+  await WhiteboardEdges.updateAsync(
+    { board: board._id, source: from },
+    { $set: { source: to } },
+    { multi: true },
+  );
+  await WhiteboardEdges.updateAsync(
+    { board: board._id, target: from },
+    { $set: { target: to } },
+    { multi: true },
+  );
+  // The comment predicate lets Mongo use the partial {board, comment.node}
+  // index.
+  await BoardComments.updateAsync(
+    { board: board._id, comment: { $exists: true }, "comment.node": from },
+    { $set: { "comment.node": to } },
+    { multi: true },
+  );
+  await BoardComments.updateAsync(
+    {
+      board: board._id,
+      comment: { $exists: true },
+      "comment.detachedFrom": from,
+    },
+    { $set: { "comment.detachedFrom": to } },
+    { multi: true },
+  );
+}
+
+// Gives a deleted puzzle's card to its replacement, keeping its place, frame,
+// size, lock and comments. A card the replacement already had goes, with its
+// lines and comments moving onto this one. The deleted puzzle's feeder arrows
+// go too; the sync this is part of draws the replacement's. Says whether the
+// card was handed over, which it isn't if someone has just put the
+// replacement on the board by hand. The lines and comments of a card the
+// replacement already had then go to that new card instead.
+async function handOverCard(
+  board: WhiteboardType,
+  card: WhiteboardNodeType,
+  puzzle: PuzzleType,
+  replacement: PuzzleType,
+  nodesById: Map<string, WhiteboardNodeType>,
+) {
+  const theirs = cardOf(nodesById, replacement._id);
+  if (theirs) {
+    await WhiteboardEdges.removeAsync({
+      board: board._id,
+      $or: [
+        { source: theirs._id, target: card._id },
+        { source: card._id, target: theirs._id },
+      ],
+    });
+    await WhiteboardNodes.removeAsync(theirs._id);
+    nodesById.delete(theirs._id);
+  }
+  let handedOver = true;
+  try {
+    await WhiteboardNodes.updateAsync(
+      { _id: card._id, puzzle: puzzle._id },
+      { $set: { puzzle: replacement._id } },
+    );
+  } catch (error) {
+    if (!isDuplicateKeyError(error)) throw error;
+    handedOver = false;
+  }
+  if (theirs) {
+    const placed = handedOver
+      ? undefined
+      : await WhiteboardNodes.findOneAsync(
+          { board: board._id, puzzle: replacement._id },
+          { projection: { _id: 1 } },
+        );
+    await moveOntoCard(board, theirs._id, placed?._id ?? card._id);
+  }
+  if (!handedOver) return false;
+  await WhiteboardEdges.removeAsync({
+    board: board._id,
+    auto: true,
+    $or: [{ feeder: puzzle._id }, { meta: puzzle._id }],
+  });
+  nodesById.set(card._id, { ...card, puzzle: replacement._id });
+  return true;
+}
+
+// A deleted puzzle's card goes to its replacement, if it has a live one, or
+// is hidden, its comments left where they were on the board as when someone
+// takes a card off it. A card someone had already taken off is left alone.
+async function retireCard(
+  board: WhiteboardType,
+  puzzle: PuzzleType,
+  replacement: PuzzleType | undefined,
+  nodesById: Map<string, WhiteboardNodeType>,
+) {
+  const card = cardOf(nodesById, puzzle._id);
+  if (!card || card.hidden) return;
+  if (
+    replacement &&
+    (await handOverCard(board, card, puzzle, replacement, nodesById))
+  ) {
+    return;
+  }
+  await detachComments(board._id, card);
+  await WhiteboardNodes.updateAsync(
+    { _id: card._id, puzzle: puzzle._id },
+    { $set: { hidden: true, hiddenWithPuzzle: true } },
+  );
+  nodesById.set(card._id, { ...card, hidden: true, hiddenWithPuzzle: true });
+}
+
+// A card hidden because its puzzle was deleted comes back where it was, with
+// the comments that came off it, once the puzzle is live again.
+async function showCardAgain(
+  board: WhiteboardType,
+  puzzle: PuzzleType,
+  nodesById: Map<string, WhiteboardNodeType>,
+) {
+  const card = cardOf(nodesById, puzzle._id);
+  if (!card?.hiddenWithPuzzle) return;
+  await WhiteboardNodes.updateAsync(
+    { _id: card._id, hiddenWithPuzzle: true },
+    { $unset: { hidden: "", hiddenWithPuzzle: "" } },
+  );
+  const shown = await WhiteboardNodes.findOneAsync(card._id, {
+    projection: PLACEMENT_PROJECTION,
+  });
+  if (!shown) {
+    nodesById.delete(card._id);
+    return;
+  }
+  nodesById.set(shown._id, shown);
+  if (!shown.hidden) await reattachComments(board._id, shown, [shown._id]);
+}
+
+// Brings the board up to date with a set of puzzles: places any that aren't
+// on it yet, moves untouched cards whose groups changed, and redraws their
+// feeder arrows. A deleted puzzle's card goes to its replacement or is
+// hidden, and comes back if the puzzle does. Safe to call as often as you
+// like.
+export async function syncPuzzlesOnBoard(huntId: string, puzzleIds: string[]) {
+  if (puzzleIds.length === 0) return;
+  const board = await Whiteboards.findOneAsync(huntBoardSelector(huntId));
+  if (!board) return;
+  if (await Flags.activeAsync("disable.whiteboard")) return;
+
+  await withLock(`whiteboard:${board._id}`, async (renew) => {
+    // The switch may have been flipped while this waited for the lock
+    if (await Flags.activeAsync("disable.whiteboard")) return;
+
+    // Everything is read once for the batch, so a batch costs one read of
+    // the board rather than one per puzzle
+    const tags = await Tags.find({ hunt: huntId }).fetchAsync();
+    const asked = await Puzzles.findAllowingDeleted({
+      hunt: huntId,
+      _id: { $in: puzzleIds },
+    }).fetchAsync();
+    const deleted = asked.filter((p) => p.deleted);
+    // A deleted puzzle's replacement is synced with it, so it's placed into
+    // the card it takes over rather than getting one of its own.
+    const replacementIds = [
+      ...new Set(
+        deleted.flatMap((p) =>
+          p.replacedBy && !puzzleIds.includes(p.replacedBy)
+            ? [p.replacedBy]
+            : [],
+        ),
+      ),
+    ];
+    const replacements =
+      replacementIds.length > 0
+        ? await Puzzles.find({
+            hunt: huntId,
+            _id: { $in: replacementIds },
+          }).fetchAsync()
+        : [];
+    const puzzlesById = new Map(
+      [...asked.filter((p) => !p.deleted), ...replacements].map((p) => [
+        p._id,
+        p,
+      ]),
+    );
+    const nodesById = new Map(
+      (
+        await WhiteboardNodes.find(
+          { board: board._id },
+          { projection: PLACEMENT_PROJECTION },
+        ).fetchAsync()
+      ).map((n) => [n._id, n]),
+    );
+    const synonyms = currentTagSynonyms();
+    const metaTags = tags.filter((t) => isMetaForTag(t, synonyms));
+    const metaPuzzles =
+      metaTags.length > 0
+        ? await Puzzles.find(
+            { hunt: huntId, tags: { $in: metaTags.map((t) => t._id) } },
+            { projection: { tags: 1 } },
+          ).fetchAsync()
+        : [];
+    for (const puzzle of deleted) {
+      await retireCard(
+        board,
+        puzzle,
+        puzzle.replacedBy ? puzzlesById.get(puzzle.replacedBy) : undefined,
+        nodesById,
+      );
+      await renew();
+    }
+    const batch: PuzzleType[] = [];
+    for (const puzzleId of [...puzzleIds, ...replacementIds]) {
+      const puzzle = puzzlesById.get(puzzleId);
+      if (!puzzle) continue;
+      batch.push(puzzle);
+      await showCardAgain(board, puzzle, nodesById);
+      await placePuzzle(board, puzzle, tags, nodesById, metaPuzzles);
+      // A long batch (a renamed round) would otherwise outlast the lock and
+      // let another sync place cards in the same slots.
+      await renew();
+    }
+    await syncAutoEdges(
+      board,
+      batch,
+      tags,
+      renew,
+      deleted.map((p) => p._id),
+    );
+  });
+}
+
+// Puzzles waiting for each hunt's deferred sync. A hunt is in here from the
+// first request until its sync finds nothing more to do; each pass takes
+// everything asked for by then, so a burst of requests (a run of tag edits,
+// say) costs a pass or two rather than a queue of syncs on the board's lock.
+const pendingSyncs = new Map<string, Set<string>>();
+// How many deferred passes and lookups are still to run
+let deferredWork = 0;
+
+// Settles once every deferred sync queued so far has run, for tests and for
+// shutting down.
+export async function deferredSyncsDone() {
+  while (deferredWork > 0) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
+
+// For callers that shouldn't wait on the board (the feed, and the restores
+// that queue a sync they can't run under their own lock).
+export function deferSyncPuzzlesOnBoard(huntId: string, puzzleIds: string[]) {
+  if (puzzleIds.length === 0) return;
+  const queued = pendingSyncs.get(huntId);
+  if (queued) {
+    puzzleIds.forEach((id) => queued.add(id));
+    return;
+  }
+
+  const pending = new Set(puzzleIds);
+  pendingSyncs.set(huntId, pending);
+  deferredWork += 1;
+  // A puzzle whose sync fails goes round once more, so a passing failure
+  // (another server taking the board's lock, say) doesn't leave its card and
+  // arrows out of step until something else touches it.
+  const retried = new Set<string>();
+  setImmediate(async () => {
+    while (pending.size > 0) {
+      const batch = [...pending];
+      pending.clear();
+      try {
+        await syncPuzzlesOnBoard(huntId, batch);
+      } catch (error) {
+        const again = batch.filter((id) => !retried.has(id));
+        Logger.error("Failed to sync puzzles onto whiteboard", {
+          hunt: huntId,
+          puzzles: batch.join(","),
+          retrying: again.length > 0,
+          error,
+        });
+        again.forEach((id) => {
+          retried.add(id);
+          pending.add(id);
+        });
+      }
+    }
+    pendingSyncs.delete(huntId);
+    deferredWork -= 1;
+  });
+}
+
+// Puts the puzzles of rounds whose frames have just come back through a
+// deferred sync, so cards that left with a frame (and haven't been moved by
+// hand since) go back into it together. Looking the puzzles up is deferred
+// too, so the caller's write stands whatever happens here.
+export function deferSyncRoundsOnBoard(huntId: string, tagIds: string[]) {
+  if (tagIds.length === 0) return;
+  deferredWork += 1;
+  setImmediate(async () => {
+    try {
+      const tags = await Tags.find(
+        { hunt: huntId },
+        { projection: { name: 1 } },
+      ).fetchAsync();
+      const wanted = [
+        ...new Set(tagIds.flatMap((tag) => roundTags(tag, tags))),
+      ];
+      const puzzles = await Puzzles.find(
+        { hunt: huntId, tags: { $in: wanted } },
+        { projection: { _id: 1 } },
+      ).fetchAsync();
+      deferSyncPuzzlesOnBoard(
+        huntId,
+        puzzles.map((p) => p._id),
+      );
+    } catch (error) {
+      Logger.error("Failed to sync restored rounds onto whiteboard", {
+        hunt: huntId,
+        tags: tagIds.join(","),
+        error,
+      });
+    } finally {
+      deferredWork -= 1;
+    }
+  });
+}
+
+// A seeded node as it's stored, under the parent its seed's parentKey mapped
+// to.
+export function seedNodeDoc(
+  board: Pick<WhiteboardType, "_id" | "hunt">,
+  seed: SeedNode,
+  parent: string | undefined,
+  createdBy: string,
+) {
+  return {
+    hunt: board.hunt,
+    board: board._id,
+    type: seed.type,
+    parent,
+    position: seed.position,
+    width: seed.width,
+    height: seed.height,
+    puzzle: seed.puzzle,
+    tag: seed.tag,
+    label: seed.label,
+    frameKind: seed.frameKind,
+    createdBy,
+  };
+}
+
+async function seedBoard(
+  board: Pick<WhiteboardType, "_id" | "hunt" | "createdBy">,
+) {
+  const puzzles = await Puzzles.find({ hunt: board.hunt }).fetchAsync();
+  const tags = await Tags.find({ hunt: board.hunt }).fetchAsync();
+  const { nodes, edges } = seedLayout(
+    puzzles,
+    tags,
+    ungroupedLabel(),
+    currentTagSynonyms(),
+  );
+
+  // Parents come before their children, so every parent key is already
+  // mapped to an id by the time a child needs it.
+  const ids = new Map<string, string>();
+  const cardsByPuzzle = new Map<string, string>();
+  const nodeDocs = nodes.map((seed) => {
+    const _id = Random.id();
+    ids.set(seed.key, _id);
+    if (seed.puzzle) cardsByPuzzle.set(seed.puzzle, _id);
+    const parent = seed.parentKey ? ids.get(seed.parentKey) : undefined;
+    return Object.assign(seedNodeDoc(board, seed, parent, board.createdBy), {
+      _id,
+    });
+  });
+  await WhiteboardNodes.insertManyAsync(nodeDocs);
+
+  // seedLayout gives every puzzle a card, so both ends are always there.
+  await WhiteboardEdges.insertManyAsync(
+    edges.flatMap(({ feeder, meta }) => {
+      const source = cardsByPuzzle.get(feeder);
+      const target = cardsByPuzzle.get(meta);
+      if (!source || !target) return [];
+      return [
+        {
+          hunt: board.hunt,
+          board: board._id,
+          source,
+          target,
+          auto: true,
+          feeder,
+          meta,
+          createdBy: board.createdBy,
+        },
+      ];
+    }),
+  );
+}
+
+// Makes the board for a scope, or finds the one it has. A hunt's board is
+// seeded with its puzzles; a puzzle's starts empty. Jolly Roger asks for it
+// over HTTP, so there's no person behind the call unless it names one.
+export async function ensureBoard(
+  scope: BoardScope,
+  createdBy: string = SERVICE_USER,
+): Promise<string> {
+  await assertWhiteboardEnabled();
+  const selector = scopeSelector(scope);
+
+  return withLock(
+    `whiteboard:create:${scope.hunt}:${scope.puzzle ?? ""}`,
+    async () => {
+      const existing = await Whiteboards.findOneAsync(selector);
+      if (existing) return existing._id;
+
+      Logger.info("Creating a whiteboard", { ...scope });
+
+      // The board's lock is taken before the board exists, so placement
+      // that finds it waits for the seeding rather than racing it for
+      // frames.
+      const boardId = Random.id();
+      return withLock(`whiteboard:${boardId}`, async () => {
+        try {
+          await Whiteboards.insertAsync({
+            _id: boardId,
+            hunt: scope.hunt,
+            puzzle: scope.puzzle,
+            createdBy,
+          });
+        } catch (error) {
+          if (!isDuplicateKeyError(error)) throw error;
+          const existing = await Whiteboards.findOneAsync(selector);
+          if (!existing) throw error;
+          return existing._id;
+        }
+
+        if (!scope.puzzle) {
+          await seedBoard({ _id: boardId, hunt: scope.hunt, createdBy });
+        }
+        return boardId;
+      });
+    },
+  );
+}
+
+// Takes a board and everything on it away, as purging its hunt did in Jolly
+// Roger. Under the board's lock, so a placement or restore part-way through
+// finishes first rather than writing to a board that's gone.
+export async function deleteBoard(boardId: string) {
+  await withLock(`whiteboard:${boardId}`, async () => {
+    await WhiteboardVersionChunks.removeAsync({ board: boardId });
+    await WhiteboardVersions.removeAsync({ board: boardId });
+    await WhiteboardEdges.removeAsync({ board: boardId });
+    await WhiteboardNodes.removeAsync({ board: boardId });
+    await BoardComments.removeAsync({ board: boardId });
+    await Whiteboards.removeAsync(boardId);
+  });
+}

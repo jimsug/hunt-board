@@ -1,0 +1,1150 @@
+import { createHash } from "node:crypto";
+import { promisify } from "node:util";
+import { gunzip, gzip } from "node:zlib";
+import type { Claims } from "lib/access";
+import { isOperator } from "lib/access";
+import { EJSON } from "lib/compat/ejson";
+import { ServiceError } from "lib/compat/error";
+import { Random } from "lib/compat/random";
+import Puzzles from "lib/models/Puzzles";
+import type { WhiteboardEdgeType } from "lib/models/WhiteboardEdges";
+import WhiteboardEdges from "lib/models/WhiteboardEdges";
+import type { WhiteboardNodeType } from "lib/models/WhiteboardNodes";
+import WhiteboardNodes from "lib/models/WhiteboardNodes";
+import type { WhiteboardType } from "lib/models/Whiteboards";
+import Whiteboards from "lib/models/Whiteboards";
+import type {
+  WhiteboardVersionKind,
+  WhiteboardVersionType,
+} from "lib/models/WhiteboardVersions";
+import WhiteboardVersions from "lib/models/WhiteboardVersions";
+import {
+  BIG_READS_PER_MINUTE,
+  MAX_BATCH,
+  MAX_KEPT_EXPORTS,
+  MAX_VERSION_BYTES_PER_BOARD,
+  VERSION_CHUNK_BYTES,
+  VERSION_INTERVAL_MS,
+} from "lib/whiteboard/limits";
+import type {
+  PrunableVersion,
+  RestorePlan,
+  VersionSummary,
+} from "lib/whiteboard/versions";
+import {
+  planItemRestore,
+  planRestore,
+  restoreItemSet,
+  VERSION_FORMAT,
+  versionDecision,
+  versionsToPrune,
+  withFreshInsertIds,
+} from "lib/whiteboard/versions";
+import Flags from "./flags";
+import Logger from "./logger";
+import WhiteboardVersionChunks from "./models/WhiteboardVersionChunks";
+import type { Bucket } from "./rateLimits";
+import { bucketFor, remember, take } from "./rateLimits";
+import { deferSyncPuzzlesOnBoard } from "./whiteboard";
+import { detachComments, reattachComments } from "./whiteboardComments";
+import {
+  assertMayEditBoard,
+  LOCKED_FIELDS,
+  loadBoardAccess,
+  lockedError,
+  modifier,
+  tooMuchInkError,
+} from "./whiteboardShared";
+import withLock, { LockPreemptedError, renewEvery } from "./withLock";
+
+// How many writes a restore makes between renewals of the board's lock.
+export const WRITES_PER_RENEWAL = 200;
+
+const gzipAsync = promisify(gzip);
+const gunzipAsync = promisify(gunzip);
+
+const unknownVersion = () => new ServiceError(404, "Unknown version");
+const unrestorable = () =>
+  new ServiceError(
+    409,
+    "This version is from an older layout and can't be restored",
+  );
+
+// Runs a rewrite of the board (a restore or a reset) under the board's lock.
+// Losing the lock part-way, to another server that thought this one had
+// died, stops the rewrite at its next renewal and refuses with a reason
+// people can act on.
+export async function withBoardLock<T>(
+  boardId: string,
+  critSection: (renew: () => Promise<void>) => Promise<T>,
+) {
+  try {
+    return await withLock(`whiteboard:${boardId}`, critSection);
+  } catch (error) {
+    if (error instanceof LockPreemptedError) {
+      throw new ServiceError(409, "The board was busy; try again");
+    }
+    throw error;
+  }
+}
+
+export async function assertHistoryEnabled(
+  message = "Board history is turned off",
+) {
+  if (await Flags.activeAsync("disable.whiteboard_versions")) {
+    throw new ServiceError(403, message);
+  }
+}
+
+const byId = (a: { _id: string }, b: { _id: string }) =>
+  a._id < b._id ? -1 : a._id > b._id ? 1 : 0;
+
+// The board as a version stores it, and its hash. Documents are sorted and
+// keys written in a fixed order, so an unchanged board hashes the same.
+export function serializeBoard(
+  nodes: WhiteboardNodeType[],
+  edges: WhiteboardEdgeType[],
+) {
+  const json = EJSON.stringify(
+    {
+      format: VERSION_FORMAT,
+      nodes: nodes.toSorted(byId),
+      edges: edges.toSorted(byId),
+    },
+    { canonical: true },
+  );
+  return { json, hash: createHash("sha256").update(json).digest("hex") };
+}
+
+// Compresses a serialised board into chunks of at most chunkBytes.
+export async function compressVersion(
+  json: string,
+  chunkBytes = VERSION_CHUNK_BYTES,
+): Promise<Uint8Array<ArrayBuffer>[]> {
+  const zipped = await gzipAsync(json);
+  const chunks: Uint8Array<ArrayBuffer>[] = [];
+  for (let start = 0; start < zipped.length; start += chunkBytes) {
+    chunks.push(new Uint8Array(zipped.subarray(start, start + chunkBytes)));
+  }
+  return chunks;
+}
+
+// The nodes and lines a version's chunks hold, checked against today's
+// schemas. Anything that doesn't fit refuses the restore.
+export async function decodeVersion(
+  chunks: Uint8Array[],
+): Promise<{ nodes: WhiteboardNodeType[]; edges: WhiteboardEdgeType[] }> {
+  try {
+    const json = (await gunzipAsync(Buffer.concat(chunks))).toString("utf8");
+    const payload = EJSON.parse(json) as {
+      format?: unknown;
+      nodes?: unknown;
+      edges?: unknown;
+    };
+    if (
+      payload.format !== VERSION_FORMAT ||
+      !Array.isArray(payload.nodes) ||
+      !Array.isArray(payload.edges)
+    ) {
+      throw new Error("Unknown payload format");
+    }
+    return {
+      nodes: payload.nodes.map((n) => WhiteboardNodes.schema.parse(n)),
+      edges: payload.edges.map((e) => WhiteboardEdges.schema.parse(e)),
+    };
+  } catch (error) {
+    Logger.warn("Couldn't read a whiteboard version", { error });
+    throw unrestorable();
+  }
+}
+
+const SUMMARY_PROJECTION = {
+  kind: 1,
+  users: 1,
+  createdAt: 1,
+  hash: 1,
+} as const;
+
+// A version userId's window is still open on, newest first.
+const openVersionSelector = (
+  boardId: string,
+  userId: string,
+  now: Date,
+  lastRewrittenAt: Date | undefined,
+) => ({
+  board: boardId,
+  kind: "edits" as const,
+  users: {
+    $elemMatch: {
+      user: userId,
+      at: { $gt: new Date(now.getTime() - VERSION_INTERVAL_MS) },
+    },
+  },
+  ...(lastRewrittenAt ? { createdAt: { $gt: lastRewrittenAt } } : {}),
+});
+
+// The versions versionDecision needs: the newest, the newest ordinary one,
+// and one userId's window is open on.
+async function versionsToDecideOn(
+  boardId: string,
+  userId: string,
+  now: Date,
+  lastRewrittenAt: Date | undefined,
+): Promise<VersionSummary[]> {
+  const options = {
+    sort: { createdAt: -1 },
+    projection: SUMMARY_PROJECTION,
+  } as const;
+  const [newest, newestEdits, open] = await Promise.all([
+    WhiteboardVersions.findOneAsync({ board: boardId }, options),
+    WhiteboardVersions.findOneAsync(
+      {
+        board: boardId,
+        kind: "edits",
+        ...(lastRewrittenAt ? { createdAt: { $gt: lastRewrittenAt } } : {}),
+      },
+      options,
+    ),
+    WhiteboardVersions.findOneAsync(
+      openVersionSelector(boardId, userId, now, lastRewrittenAt),
+      options,
+    ),
+  ]);
+  if (!newest) return [];
+  const others = new Map<string, VersionSummary>();
+  [newestEdits, open].forEach((v) => {
+    if (v && v._id !== newest._id) others.set(v._id, v);
+  });
+  return [
+    newest,
+    ...[...others.values()].toSorted(
+      (a, b) => b.createdAt.getTime() - a.createdAt.getTime(),
+    ),
+  ];
+}
+
+// Counts an edit against a version, adding userId to it or starting their
+// window again if asked.
+async function countEdit(
+  versionId: string,
+  userId: string,
+  now: Date,
+  windowStart?: { listed: boolean },
+) {
+  if (!windowStart) {
+    await WhiteboardVersions.updateAsync(versionId, {
+      $inc: { changeCount: 1 },
+      $set: { lastEditAt: now },
+    });
+  } else if (windowStart.listed) {
+    await WhiteboardVersions.updateAsync(
+      { _id: versionId, "users.user": userId },
+      {
+        $inc: { changeCount: 1 },
+        $set: { lastEditAt: now, "users.$.at": now },
+      },
+    );
+  } else {
+    await WhiteboardVersions.updateAsync(versionId, {
+      $inc: { changeCount: 1 },
+      $set: { lastEditAt: now },
+      $push: { users: { user: userId, at: now } },
+    });
+  }
+}
+
+// Removes versions, their headers before their chunks, and notes on the
+// board that older history has gone.
+async function dropVersions(
+  boardId: string,
+  versions: PrunableVersion[],
+  ids: string[],
+) {
+  if (ids.length === 0) return;
+  const dropping = new Set(ids);
+  const newestDropped = Math.max(
+    ...versions
+      .filter((v) => dropping.has(v._id))
+      .map((v) => v.createdAt.getTime()),
+  );
+  await WhiteboardVersions.removeAsync({ board: boardId, _id: { $in: ids } });
+  await WhiteboardVersionChunks.removeAsync({
+    board: boardId,
+    version: { $in: ids },
+  });
+  const prunedBefore = new Date(newestDropped);
+  await Whiteboards.updateAsync(
+    {
+      _id: boardId,
+      $or: [
+        { versionsPrunedBefore: { $exists: false } },
+        { versionsPrunedBefore: { $lt: prunedBefore } },
+      ],
+    },
+    { $set: { versionsPrunedBefore: prunedBefore } },
+  );
+}
+
+const PRUNE_PROJECTION = { kind: 1, createdAt: 1, size: 1 } as const;
+
+// Chunks are written just before their version, so ones this old with no
+// version are left from a write that didn't finish.
+const ORPHAN_CHUNK_MS = 60 * 60 * 1000;
+
+// Prunes each board's history as of now, sweeps up chunks with no version,
+// and returns how many compressed bytes each board's history now takes. A
+// board that fails is logged and left for the next pass, so it can't hold
+// up the rest.
+export async function pruneWhiteboardVersions(now: Date) {
+  const sizes = new Map<string, number>();
+  const boardIds: string[] =
+    await WhiteboardVersions.rawCollection().distinct("board");
+  for (const boardId of boardIds) {
+    try {
+      await withLock(`whiteboard:${boardId}`, async () => {
+        const board = await Whiteboards.findOneAsync(boardId, {
+          projection: { archived: 1 },
+        });
+        const versions = await WhiteboardVersions.find(
+          { board: boardId },
+          { projection: PRUNE_PROJECTION },
+        ).fetchAsync();
+        const dropped = versionsToPrune(versions, now, {
+          archived: !!board?.archived,
+        });
+        await dropVersions(boardId, versions, dropped);
+        const gone = new Set(dropped);
+        sizes.set(
+          boardId,
+          versions
+            .filter((v) => !gone.has(v._id))
+            .reduce((sum, v) => sum + v.size, 0),
+        );
+      });
+    } catch (error) {
+      Logger.warn("Couldn't prune whiteboard history", {
+        board: boardId,
+        error,
+      });
+    }
+  }
+
+  const chunks = WhiteboardVersionChunks.rawCollection();
+  const chunkBoards: string[] = await chunks.distinct("board");
+  const cutoff = new Date(now.getTime() - ORPHAN_CHUNK_MS);
+  for (const boardId of chunkBoards) {
+    try {
+      const versionIds: string[] = await chunks.distinct("version", {
+        board: boardId,
+        createdAt: { $lt: cutoff },
+      });
+      if (versionIds.length === 0) continue;
+      const listed = new Set(
+        (
+          await WhiteboardVersions.find(
+            { _id: { $in: versionIds } },
+            { projection: { _id: 1 } },
+          ).fetchAsync()
+        ).map((v) => v._id),
+      );
+      const orphans = versionIds.filter((id) => !listed.has(id));
+      if (orphans.length > 0) {
+        await WhiteboardVersionChunks.removeAsync({
+          board: boardId,
+          version: { $in: orphans },
+        });
+      }
+    } catch (error) {
+      Logger.warn("Couldn't sweep whiteboard history chunks", {
+        board: boardId,
+        error,
+      });
+    }
+  }
+
+  return sizes;
+}
+
+// Keeps a board's history under MAX_VERSION_BYTES_PER_BOARD. Runs under the
+// board's lock, and never fails the write it's part of: the retention daemon
+// tries again later.
+async function pruneOverCap(board: WhiteboardType, now: Date) {
+  try {
+    const versions = await WhiteboardVersions.find(
+      { board: board._id },
+      { projection: PRUNE_PROJECTION },
+    ).fetchAsync();
+    const total = versions.reduce((sum, v) => sum + v.size, 0);
+    if (total <= MAX_VERSION_BYTES_PER_BOARD) return;
+    await dropVersions(
+      board._id,
+      versions,
+      versionsToPrune(versions, now, { archived: false }),
+    );
+  } catch (error) {
+    Logger.warn("Couldn't prune whiteboard history", {
+      board: board._id,
+      error,
+    });
+  }
+}
+
+// Records the board as it is now, if versionDecision says to, for a write
+// of kind by userId, and returns the id of the version it adds, if any. Only
+// for callers holding whiteboard:<boardId>, whose renew this calls between
+// the slow steps. A failure to snapshot throws; pruning afterwards never
+// does.
+async function recordVersionLocked(
+  board: WhiteboardType,
+  userId: string,
+  kind: WhiteboardVersionKind,
+  renew: () => Promise<void>,
+  extra: { restoredFromAt?: Date } = {},
+): Promise<string | undefined> {
+  const now = new Date();
+  const { lastRewrittenAt } =
+    (await Whiteboards.findOneAsync(board._id, {
+      projection: { lastRewrittenAt: 1 },
+    })) ?? {};
+  const versions = await versionsToDecideOn(
+    board._id,
+    userId,
+    now,
+    lastRewrittenAt,
+  );
+  const decide = (hash?: string) =>
+    versionDecision({
+      kind,
+      user: userId,
+      now,
+      lastRewrittenAt,
+      versions,
+      hash,
+    });
+
+  let decision = decide();
+  if (decision.action === "extend") {
+    await countEdit(decision.version, userId, now);
+    return undefined;
+  }
+  if (decision.action === "join") {
+    await countEdit(decision.version, userId, now, decision);
+    return undefined;
+  }
+
+  const nodes = await WhiteboardNodes.find({ board: board._id }).fetchAsync();
+  const edges = await WhiteboardEdges.find({ board: board._id }).fetchAsync();
+  await renew();
+  const { json, hash } = serializeBoard(nodes, edges);
+  decision = decide(hash);
+  if (decision.action === "unchanged") {
+    await countEdit(decision.version, userId, now, decision);
+    return undefined;
+  }
+
+  const chunks = await compressVersion(json);
+  await renew();
+  const versionId = Random.id();
+  // The chunks go first, so a version that's listed always has its payload.
+  for (const [index, data] of chunks.entries()) {
+    await renew();
+    await WhiteboardVersionChunks.insertAsync({
+      hunt: board.hunt,
+      board: board._id,
+      version: versionId,
+      index,
+      data,
+      createdAt: now,
+    });
+  }
+  await WhiteboardVersions.insertAsync({
+    _id: versionId,
+    hunt: board.hunt,
+    board: board._id,
+    kind,
+    users: [{ user: userId, at: now }],
+    changeCount: 1,
+    lastEditAt: now,
+    restoredFromAt: extra.restoredFromAt,
+    nodeCount: nodes.length,
+    edgeCount: edges.length,
+    size: chunks.reduce((sum, c) => sum + c.length, 0),
+    chunkCount: chunks.length,
+    format: VERSION_FORMAT,
+    hash,
+    createdAt: now,
+    createdBy: userId,
+  });
+
+  await pruneOverCap(board, now);
+  return versionId;
+}
+
+// Called by every edit that can change the layout, after its checks and
+// before its first write. A missing version beats a refused edit, so this
+// never throws.
+export async function recordVersionBeforeEdit(
+  board: WhiteboardType,
+  userId: string,
+) {
+  try {
+    if (await Flags.activeAsync("disable.whiteboard_versions")) return;
+
+    // Most edits extend a version, which needs no lock.
+    const now = new Date();
+    const open = await WhiteboardVersions.findOneAsync(
+      openVersionSelector(board._id, userId, now, board.lastRewrittenAt),
+      { sort: { createdAt: -1 }, projection: SUMMARY_PROJECTION },
+    );
+    if (
+      open &&
+      versionDecision({
+        kind: "edits",
+        user: userId,
+        now,
+        lastRewrittenAt: board.lastRewrittenAt,
+        versions: [open],
+      }).action === "extend"
+    ) {
+      await countEdit(open._id, userId, now);
+      return;
+    }
+
+    await withLock(`whiteboard:${board._id}`, (renew) =>
+      recordVersionLocked(board, userId, "edits", renew),
+    );
+  } catch (error) {
+    Logger.warn("Couldn't record a whiteboard version", {
+      board: board._id,
+      user: userId,
+      error,
+    });
+  }
+}
+
+// Records the board for an edit that holds the board's lock, then checks
+// the lock is still held before the edit's first write. Losing the lock
+// stops the edit, and takes away the version just recorded for it, as that
+// edit never runs. A rewrite (a restore or a reset), or an edit that can't
+// go unrecorded, is `required`: it fails if the board can't be recorded.
+// Otherwise nothing is recorded while history is off, and any other failure
+// to record is logged and the edit goes ahead, as a missing version beats a
+// refused edit.
+export async function recordVersionUnderLock(
+  board: WhiteboardType,
+  userId: string,
+  kind: WhiteboardVersionKind,
+  renew: () => Promise<void>,
+  {
+    extra = {},
+    required = false,
+  }: { extra?: { restoredFromAt?: Date }; required?: boolean } = {},
+) {
+  let versionId: string | undefined;
+  try {
+    if (required || !(await Flags.activeAsync("disable.whiteboard_versions"))) {
+      versionId = await recordVersionLocked(board, userId, kind, renew, extra);
+    }
+  } catch (error) {
+    if (required || error instanceof LockPreemptedError) throw error;
+    Logger.warn("Couldn't record a whiteboard version", {
+      board: board._id,
+      user: userId,
+      error,
+    });
+  }
+  try {
+    await renew();
+  } catch (error) {
+    if (versionId && error instanceof LockPreemptedError) {
+      await WhiteboardVersions.removeAsync({
+        _id: versionId,
+        board: board._id,
+      });
+      await WhiteboardVersionChunks.removeAsync({
+        board: board._id,
+        version: versionId,
+      });
+    }
+    throw error;
+  }
+}
+
+// An export part-way through being fetched: the board as it was when its
+// first chunk was asked for, compressed once for all its chunks.
+interface PendingExport {
+  boardId: string;
+  hash: string;
+  chunks: Uint8Array<ArrayBuffer>[];
+  // When a chunk of it was last fetched.
+  fetchedAt: number;
+}
+// How long an export is kept for its later chunks after its last fetch.
+export const EXPORT_KEPT_MS = 5 * 60 * 1000;
+// By connection, which fetches one export at a time, least recently fetched
+// first. Each is dropped once its last chunk is sent, when the connection
+// starts another, when the connection closes, once nothing has fetched from
+// it for EXPORT_KEPT_MS (checked on the next export anyone asks for), or when
+// the server is keeping MAX_KEPT_EXPORTS others fetched from since, so
+// abandoned exports don't sit in memory.
+const pendingExports = new Map<string, PendingExport>();
+const watchedConnections = new Set<string>();
+
+// What exportBoard needs of the websocket connection asking: an id to keep
+// its export under, and a way to hear it close.
+export interface ExportConnection {
+  id: string;
+  onClose(cb: () => void): void;
+}
+
+// Each person's chunk fetches, versions and exports together, across all
+// their connections: a bucket of BIG_READS_PER_MINUTE tokens refilled
+// evenly over a minute. A bucket left alone for a minute is full again, the
+// same as none, so it's dropped.
+const bigReads = new Map<string, Bucket>();
+const BIG_READ_REFILL_MS = 60 * 1000;
+const BIG_READS_PER_SECOND = BIG_READS_PER_MINUTE / 60;
+
+function takeBigRead(userId: string) {
+  const now = Date.now();
+  bigReads.forEach(({ refilledAt }, user) => {
+    if (now - refilledAt >= BIG_READ_REFILL_MS) bigReads.delete(user);
+  });
+  const bucket = bucketFor(bigReads, userId, now, BIG_READS_PER_MINUTE);
+  if (!take(bucket, now, BIG_READS_PER_MINUTE, BIG_READS_PER_SECOND)) {
+    throw new ServiceError(
+      429,
+      "That's a lot of downloading; try again in a minute",
+    );
+  }
+}
+
+function dropStaleExports(now: number) {
+  pendingExports.forEach((pending, connectionId) => {
+    if (now - pending.fetchedAt >= EXPORT_KEPT_MS) {
+      pendingExports.delete(connectionId);
+    }
+  });
+}
+
+function keepExport(connection: ExportConnection, pending: PendingExport) {
+  remember(pendingExports, connection.id, pending, MAX_KEPT_EXPORTS);
+  if (watchedConnections.has(connection.id)) return;
+  watchedConnections.add(connection.id);
+  connection.onClose(() => {
+    pendingExports.delete(connection.id);
+    watchedConnections.delete(connection.id);
+  });
+}
+
+// One chunk of the board as it is now, in a version's payload format, for
+// anyone who can see the board, archived or not. Chunk 0 reads and
+// compresses the board; a later chunk asked for with chunk 0's hash comes
+// from that same export if this connection still has it, and otherwise the
+// board is read again, so a client fetching several checks they share a
+// hash. The same board always compresses the same way.
+export async function exportBoard(
+  claims: Claims,
+  boardId: string,
+  index: number,
+  hash: string | undefined,
+  connection: ExportConnection | null,
+) {
+  takeBigRead(claims.user);
+  await loadBoardAccess(claims, boardId);
+  if (!Number.isInteger(index) || index < 0) {
+    throw new ServiceError(400, "No such part of the board");
+  }
+  dropStaleExports(Date.now());
+  let pending = connection ? pendingExports.get(connection.id) : undefined;
+  if (index === 0 || pending?.boardId !== boardId || pending.hash !== hash) {
+    const nodes = await WhiteboardNodes.find({ board: boardId }).fetchAsync();
+    const edges = await WhiteboardEdges.find({ board: boardId }).fetchAsync();
+    const serialized = serializeBoard(nodes, edges);
+    pending = {
+      boardId,
+      hash: serialized.hash,
+      chunks: await compressVersion(serialized.json),
+      fetchedAt: Date.now(),
+    };
+  } else {
+    pending.fetchedAt = Date.now();
+  }
+  const data = pending.chunks[index];
+  if (connection) {
+    if (data && index < pending.chunks.length - 1) {
+      keepExport(connection, pending);
+    } else {
+      pendingExports.delete(connection.id);
+    }
+  }
+  if (!data) throw new ServiceError(400, "No such part of the board");
+  return { data, chunkCount: pending.chunks.length, hash: pending.hash };
+}
+
+// One chunk of a version's payload, for anyone who can see the board.
+export async function fetchVersion(
+  claims: Claims,
+  boardId: string,
+  versionId: string,
+  index: number,
+) {
+  takeBigRead(claims.user);
+  await loadBoardAccess(claims, boardId);
+  await assertHistoryEnabled();
+  const version = await WhiteboardVersions.findOneAsync({
+    _id: versionId,
+    board: boardId,
+  });
+  if (!version || !Number.isInteger(index) || index < 0) {
+    throw unknownVersion();
+  }
+  if (index >= version.chunkCount) throw unknownVersion();
+  const chunk = await WhiteboardVersionChunks.findOneAsync({
+    version: versionId,
+    index,
+  });
+  if (!chunk) throw unknownVersion();
+  return chunk.data;
+}
+
+// A version's nodes and lines as they'd be restored. Only for callers
+// holding the board's lock, whose renew this calls between the slow steps.
+async function readVersionLocked(
+  version: WhiteboardVersionType,
+  renew: () => Promise<void>,
+) {
+  const chunks = await WhiteboardVersionChunks.find(
+    { version: version._id },
+    { sort: { index: 1 } },
+  ).fetchAsync();
+  await renew();
+  if (!(await WhiteboardVersions.findOneAsync(version._id))) {
+    throw unknownVersion();
+  }
+  if (
+    chunks.length !== version.chunkCount ||
+    chunks.some((c, i) => c.index !== i)
+  ) {
+    throw unrestorable();
+  }
+
+  const target = await decodeVersion(chunks.map((c) => c.data));
+  await renew();
+  return target;
+}
+
+// The hunt's puzzles that aren't deleted, whose cards a restore may put back.
+async function livePuzzleIds(huntId: string) {
+  return new Set(
+    await Puzzles.find(
+      { hunt: huntId, kind: { $ne: "whiteboard" } },
+      { projection: { _id: 1 } },
+    ).mapAsync((p) => p._id),
+  );
+}
+
+// What a restore plans with: only an operator puts back the locks a version
+// has, and only cards of puzzles that aren't deleted come back.
+const planOptions = async (claims: Claims, huntId: string) => ({
+  keepLocks: !isOperator(claims),
+  livePuzzles: await livePuzzleIds(huntId),
+});
+
+// Runs an edit from one of the board's versions under the board's lock.
+// Before the lock it refuses unless the caller may edit the board, history
+// is on and the version is this board's, then `beforeLock` checks the rest
+// of the request. Anything may have changed while it waited for the lock,
+// so the same three are checked again under it before the version is read.
+async function withVersionLocked<T>(
+  claims: Claims,
+  boardId: string,
+  versionId: string,
+  body: (locked: {
+    current: WhiteboardType;
+    version: WhiteboardVersionType;
+    target: Awaited<ReturnType<typeof readVersionLocked>>;
+    renew: () => Promise<void>;
+  }) => Promise<T>,
+  beforeLock?: () => void,
+) {
+  const { board } = await assertMayEditBoard(claims, boardId);
+  await assertHistoryEnabled();
+  const version = await WhiteboardVersions.findOneAsync({
+    _id: versionId,
+    board: boardId,
+  });
+  if (!version) throw unknownVersion();
+  beforeLock?.();
+
+  const result = await withBoardLock(boardId, async (renew) => {
+    const { board: current } = await assertMayEditBoard(claims, boardId);
+    await assertHistoryEnabled();
+    const target = await readVersionLocked(version, renew);
+    return body({ current, version, target, renew });
+  });
+  return { board, result };
+}
+
+// Random.id()'s alphabet, which ids on the board are checked against.
+const ID_CHARS = "23456789ABCDEFGHJKLMNPQRSTWXYZabcdefghijkmnopqrstuvwxyz";
+// How many derived ids are tried for one taken id before a random one.
+const DERIVED_ID_ATTEMPTS = 8;
+
+// An id worked out from the board, the id it stands in for and the attempt,
+// so restoring the same version again gives a renamed node the same id (and
+// its comments find it).
+function derivedId(boardId: string, id: string, attempt: number) {
+  const digest = createHash("sha256")
+    .update(`${boardId}:${id}:${attempt}`)
+    .digest();
+  return Array.from(
+    digest.subarray(0, 17),
+    (byte) => ID_CHARS[byte % ID_CHARS.length],
+  ).join("");
+}
+
+type IdLookup = (ids: string[]) => Promise<{ _id: string; board: string }[]>;
+const nodesById: IdLookup = (ids) =>
+  WhiteboardNodes.find(
+    { _id: { $in: ids } },
+    { projection: { _id: 1, board: 1 } },
+  ).fetchAsync();
+const edgesById: IdLookup = (ids) =>
+  WhiteboardEdges.find(
+    { _id: { $in: ids } },
+    { projection: { _id: 1, board: 1 } },
+  ).fetchAsync();
+
+// New ids for those of `ids` that are in use (as lookup finds them), where
+// ids on this board that the plan removes count as free. Each is the first
+// derived id that's free and not otherwise in the plan, or a random one if
+// none of DERIVED_ID_ATTEMPTS is.
+async function freeIdsFor(
+  lookup: IdLookup,
+  boardId: string,
+  ids: string[],
+  removed: ReadonlySet<string>,
+): Promise<Map<string, string>> {
+  const inUse = async (candidates: string[]) =>
+    new Set(
+      candidates.length === 0
+        ? []
+        : (await lookup(candidates))
+            .filter((doc) => doc.board !== boardId || !removed.has(doc._id))
+            .map((doc) => doc._id),
+    );
+  const taken = await inUse(ids);
+  const used = new Set(ids);
+  const renamed = new Map<string, string>();
+  let pending = ids.filter((id) => taken.has(id));
+  for (
+    let attempt = 0;
+    pending.length > 0 && attempt < DERIVED_ID_ATTEMPTS;
+    attempt++
+  ) {
+    const candidates = pending.map(
+      (id) => [id, derivedId(boardId, id, attempt)] as const,
+    );
+    const busy = await inUse(candidates.map(([, candidate]) => candidate));
+    pending = candidates.flatMap(([id, candidate]) => {
+      if (busy.has(candidate) || used.has(candidate)) return [id];
+      used.add(candidate);
+      renamed.set(id, candidate);
+      return [];
+    });
+  }
+  pending.forEach((id) => renamed.set(id, Random.id()));
+  return renamed;
+}
+
+// The plan with other ids for what it would insert under an id another
+// board's document has. Ids are chosen by clients and a deleted node's id is
+// free again, so one a version holds may since have been taken elsewhere.
+// Only for callers holding the board's lock, so nothing on this board can
+// take one in the meantime.
+async function withFreeIds(
+  boardId: string,
+  versionId: string,
+  plan: RestorePlan,
+): Promise<RestorePlan> {
+  const renamed = {
+    nodes: await freeIdsFor(
+      nodesById,
+      boardId,
+      plan.nodes.insert.map((n) => n._id),
+      new Set(plan.nodes.remove),
+    ),
+    edges: await freeIdsFor(
+      edgesById,
+      boardId,
+      plan.edges.insert.map((e) => e._id),
+      new Set(plan.edges.remove),
+    ),
+  };
+  if (renamed.nodes.size > 0 || renamed.edges.size > 0) {
+    Logger.info("Restoring whiteboard documents under new ids", {
+      board: boardId,
+      version: versionId,
+      nodes: [...renamed.nodes.keys()].join(","),
+      edges: [...renamed.edges.keys()].join(","),
+    });
+  }
+  return withFreshInsertIds(plan, renamed);
+}
+
+async function readBoard(boardId: string) {
+  return {
+    nodes: await WhiteboardNodes.find({ board: boardId }).fetchAsync(),
+    edges: await WhiteboardEdges.find({ board: boardId }).fetchAsync(),
+  };
+}
+
+// Writes a restore plan to the board: comments come off the nodes leaving or
+// being hidden, then documents are removed, changed and inserted, and then
+// comments go back on nodes that are back. Every step can be run again, and
+// planning again from wherever a failure left the board picks up what's
+// left. Only for callers holding the board's lock.
+async function writeRestorePlan(
+  board: WhiteboardType,
+  liveNodes: WhiteboardNodeType[],
+  plan: RestorePlan,
+  renew: () => Promise<void>,
+) {
+  const wrote = renewEvery(renew, WRITES_PER_RENEWAL);
+
+  // Before anything moves, since a pin's place on the board is worked out
+  // from its node's frames.
+  const liveById = new Map(liveNodes.map((n) => [n._id, n]));
+  for (const id of plan.detach) {
+    const node = liveById.get(id);
+    if (node) await detachComments(board._id, node);
+    await wrote();
+  }
+
+  if (plan.edges.remove.length > 0) {
+    await WhiteboardEdges.removeAsync({
+      board: board._id,
+      _id: { $in: plan.edges.remove },
+    });
+  }
+  if (plan.nodes.remove.length > 0) {
+    await WhiteboardNodes.removeAsync({
+      board: board._id,
+      _id: { $in: plan.nodes.remove },
+    });
+  }
+  await renew();
+  for (const { _id, $set, $unset } of plan.nodes.change) {
+    const update = modifier($set, $unset);
+    if (update) await WhiteboardNodes.updateAsync(_id, update);
+    await wrote();
+  }
+  for (const { _id, $set, $unset } of plan.edges.change) {
+    const update = modifier($set, $unset);
+    if (update) await WhiteboardEdges.updateAsync(_id, update);
+    await wrote();
+  }
+  // What comes back is new on the board as it is now, so it draws on top
+  // like anything the restore changed.
+  const updatedAt = new Date();
+  [...plan.nodes.insert, ...plan.edges.insert].forEach((doc) => {
+    doc.updatedAt = updatedAt;
+  });
+  for (let i = 0; i < plan.nodes.insert.length; i += WRITES_PER_RENEWAL) {
+    await WhiteboardNodes.insertManyAsync(
+      plan.nodes.insert.slice(i, i + WRITES_PER_RENEWAL),
+    );
+    await renew();
+  }
+  for (let i = 0; i < plan.edges.insert.length; i += WRITES_PER_RENEWAL) {
+    await WhiteboardEdges.insertManyAsync(
+      plan.edges.insert.slice(i, i + WRITES_PER_RENEWAL),
+    );
+    await renew();
+  }
+
+  for (const { node, from } of plan.reattach) {
+    const doc = await WhiteboardNodes.findOneAsync(node);
+    if (doc) await reattachComments(board._id, doc, from);
+    await wrote();
+  }
+}
+
+// Puts the board back as a version has it, recording the board as it is
+// first. Comments stay, coming off nodes the restore takes away and going
+// back on nodes it brings back. Who may edit the board isn't changed, and
+// unless the caller is an operator neither is who holds a lock: every node
+// keeps the lock it has, and nodes the restore brings back come unlocked.
+export async function restoreVersion(
+  claims: Claims,
+  boardId: string,
+  versionId: string,
+) {
+  const userId = claims.user;
+  const { board } = await withVersionLocked(
+    claims,
+    boardId,
+    versionId,
+    async ({ current, version, target, renew }) => {
+      const live = await readBoard(boardId);
+      await renew();
+      const result = planRestore(
+        live,
+        target,
+        await planOptions(claims, current.hunt),
+      );
+      if (!result.ok) {
+        throw new ServiceError(
+          409,
+          result.reason === "tooMuchInk"
+            ? "This version has more drawing on it than a board can hold"
+            : "This version has more on it than a board can hold",
+        );
+      }
+      const plan = await withFreeIds(boardId, version._id, result.plan);
+      await renew();
+
+      // Nothing has been written yet, so a failure here leaves the board as
+      // it was.
+      await recordVersionUnderLock(current, userId, "restore", renew, {
+        extra: { restoredFromAt: version.createdAt },
+        required: true,
+      });
+
+      try {
+        await writeRestorePlan(current, live.nodes, plan, renew);
+      } catch (error) {
+        if (error instanceof LockPreemptedError) throw error;
+        // Part of the plan is written. Planning again from the board as it was
+        // left finishes the restore rather than leaving it half done; the
+        // first plan's comments are put back too, as nodes it brought back are
+        // no longer new to the second.
+        Logger.warn("A whiteboard restore failed part-way; finishing it", {
+          board: boardId,
+          version: version._id,
+          error,
+        });
+        const left = await readBoard(boardId);
+        await renew();
+        const again = planRestore(
+          left,
+          target,
+          await planOptions(claims, current.hunt),
+        );
+        if (!again.ok) throw error;
+        const rest = await withFreeIds(boardId, version._id, again.plan);
+        rest.reattach.push(...plan.reattach);
+        await writeRestorePlan(current, left.nodes, rest, renew);
+      }
+
+      await Whiteboards.updateAsync(boardId, {
+        $set: { lastRewrittenAt: new Date() },
+      });
+    },
+  );
+
+  // Puts cards the version didn't have into their rounds, and redraws feeder
+  // arrows. It takes the board's lock, so it can't run inside it.
+  deferSyncPuzzlesOnBoard(board.hunt, [...(await livePuzzleIds(board.hunt))]);
+}
+
+// Puts some of a version's nodes back as the version has them, with what
+// restoreItemSet adds to them, leaving the rest of the board alone. It's an
+// edit, recorded and coalesced like any other: nothing live is removed and
+// the board isn't marked as rewritten. Returns whether anything on the board
+// changed.
+export async function restoreItems(
+  claims: Claims,
+  boardId: string,
+  versionId: string,
+  nodeIds: string[],
+): Promise<boolean> {
+  const userId = claims.user;
+  const {
+    board,
+    result: { puzzles, restored },
+  } = await withVersionLocked(
+    claims,
+    boardId,
+    versionId,
+    async ({ current, version, target, renew }) => {
+      const items = restoreItemSet(target, nodeIds);
+      if (!items) throw new ServiceError(404, "That isn't in this version");
+      if (items.nodes.size > MAX_BATCH || items.edges.size > MAX_BATCH) {
+        throw new ServiceError(400, "That's too much to restore at once");
+      }
+
+      const live = await readBoard(boardId);
+      await renew();
+      const result = planItemRestore(
+        live,
+        target,
+        items,
+        await planOptions(claims, current.hunt),
+      );
+      if (!result.ok) {
+        throw result.reason === "tooMuchInk"
+          ? tooMuchInkError()
+          : new ServiceError(400, "This board is full");
+      }
+      const plan = await withFreeIds(boardId, version._id, result.plan);
+      // Restoring an item is a person's edit, so like Place by tags it doesn't
+      // move, change or unlock anything locked, whoever asks.
+      const liveById = new Map(live.nodes.map((n) => [n._id, n]));
+      const lockedKeys = new Set<string>([
+        ...LOCKED_FIELDS,
+        "locked",
+        "lockedBy",
+      ]);
+      if (
+        plan.nodes.change.some(
+          (c) =>
+            liveById.get(c._id)?.locked &&
+            [...Object.keys(c.$set), ...Object.keys(c.$unset)].some((key) =>
+              lockedKeys.has(key),
+            ),
+        )
+      ) {
+        throw lockedError();
+      }
+      const restored =
+        plan.nodes.change.length > 0 ||
+        plan.nodes.insert.length > 0 ||
+        plan.edges.change.length > 0 ||
+        plan.edges.insert.length > 0;
+      // Nothing to write is no edit, so it isn't recorded either.
+      if (
+        !restored &&
+        plan.nodes.remove.length === 0 &&
+        plan.edges.remove.length === 0 &&
+        plan.detach.length === 0 &&
+        plan.reattach.length === 0
+      ) {
+        return { puzzles: result.puzzles, restored };
+      }
+
+      // Nothing has been written yet, so a failure here leaves the board as
+      // it was.
+      await recordVersionUnderLock(current, userId, "edits", renew, {
+        required: true,
+      });
+      await writeRestorePlan(current, live.nodes, plan, renew);
+      return { puzzles: result.puzzles, restored };
+    },
+    () => {
+      if (nodeIds.length === 0) {
+        throw new ServiceError(400, "Nothing to restore");
+      }
+      if (nodeIds.length > MAX_BATCH) {
+        throw new ServiceError(400, "Too many nodes at once");
+      }
+    },
+  );
+
+  // Puts restored cards that placement looks after into their rounds, and
+  // redraws their feeder arrows. It takes the board's lock, so it can't run
+  // inside it.
+  deferSyncPuzzlesOnBoard(board.hunt, puzzles);
+  return restored;
+}

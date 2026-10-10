@@ -16,9 +16,12 @@ export type WhiteboardEditPolicy = (typeof WhiteboardEditPolicies)[number];
 const Whiteboard = withCommon(
   z.object({
     hunt: foreignKey,
-    // The hidden puzzle (kind: "whiteboard") that carries the board's chat and
-    // call.
-    puzzle: foreignKey,
+    // The puzzle the board is scoped to, for a puzzle's board; unset on the
+    // hunt's board, the one placement puts cards on.
+    puzzle: foreignKey.optional(),
+    // Set by Jolly Roger once the hunt is archived. Access is the token's
+    // business; this only lets history thin sooner.
+    archived: z.boolean().optional(),
     editPolicy: z.enum(WhiteboardEditPolicies).optional(),
     // The people besides operators who may edit under "operatorsAndEditors".
     // Kept under the other policies, so switching back doesn't lose it.
@@ -33,8 +36,8 @@ const Whiteboard = withCommon(
 );
 
 const Whiteboards = new Model("jr_whiteboards", Whiteboard);
-Whiteboards.addIndex({ hunt: 1 }, { unique: true });
-Whiteboards.addIndex({ puzzle: 1 });
+// One board per scope: the hunt's own (no puzzle) and one per puzzle
+Whiteboards.addIndex({ hunt: 1, puzzle: 1 }, { unique: true });
 export type WhiteboardType = ModelType<typeof Whiteboards>;
 
 export default Whiteboards;
