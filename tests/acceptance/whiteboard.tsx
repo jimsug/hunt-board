@@ -6546,7 +6546,8 @@ describe("whiteboard page", function () {
           within(panel).getAllByRole("button", { name: "React" })[0]!,
         );
         const tick = await waitFor(() => {
-          const found = document.querySelector('[data-unified="2705"]');
+          // The row of emoji that stands in for the picker
+          const found = document.querySelector('button[aria-label="✅"]');
           assert.exists(found);
           return found;
         });

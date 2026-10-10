@@ -219,13 +219,26 @@ export class BoardConnection {
   // Jolly Roger's presence subscription put a connection on the board and
   // its stop took it off; here a socket on the board is just that. Joining
   // once already joined is nothing; stopping leaves (the socket closes,
-  // and the next call or join opens another).
+  // and the next call or join opens another). The leaving waits a turn:
+  // Jolly Roger took the presence off at once, but a live update sent
+  // straight after put it back before anyone's buffered writes flushed,
+  // so a call made straight after a stop keeps this connection on the
+  // board, as that did.
+  private leaving: ReturnType<typeof setTimeout> | undefined;
+
   join(): { stop: () => void } {
+    this.stayOn();
     if (this.session.status === "closed") void this.rejoin();
     return { stop: () => this.leave() };
   }
 
+  private stayOn() {
+    clearTimeout(this.leaving);
+    this.leaving = undefined;
+  }
+
   async rejoin() {
+    this.stayOn();
     if (this.opening) return this.opening;
     if (this.session.status !== "closed") return;
     const token = await mintToken(this.person, this.name);
@@ -234,8 +247,12 @@ export class BoardConnection {
   }
 
   leave() {
-    this.session.close();
-    this.presence.replaceAll([]);
+    if (this.leaving) return;
+    this.leaving = setTimeout(() => {
+      this.leaving = undefined;
+      this.session.close();
+      this.presence.replaceAll([]);
+    }, 0);
   }
 
   private boardId() {
@@ -325,6 +342,7 @@ export class BoardConnection {
   }
 
   close() {
+    this.stayOn();
     this.session.close();
     if (this.isPage) setSession(undefined);
   }

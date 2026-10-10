@@ -4,6 +4,7 @@ import "bootstrap/dist/css/bootstrap.min.css";
 import "@xyflow/react/dist/style.css";
 import "client/app.css";
 import "client/i18n";
+import { WhiteboardNodes } from "client/store";
 
 // The runner page: mocha in the browser over the client's own modules,
 // against the service the page was loaded from (in test mode). The
@@ -56,7 +57,23 @@ async function main() {
   // Registered before the tests (and Testing Library's own cleanup), so a
   // failed test is pictured with its board still up
   afterEach(async function () {
-    if (this.currentTest?.state === "failed") await window.__screenshot?.();
+    if (this.currentTest?.state !== "failed") return;
+    // Where the board was looking, and how much of it was drawn, for a
+    // failure the screenshot alone doesn't explain
+    const viewport = document.querySelector<HTMLElement>(
+      ".react-flow__viewport",
+    );
+    const stored = WhiteboardNodes.find().fetch();
+    const xs = stored.map((n) => n.position.x);
+    const ys = stored.map((n) => n.position.y);
+    const saved = Object.keys(localStorage)
+      .filter((key) => key.startsWith("whiteboard:"))
+      .map((key) => `${key}=${localStorage.getItem(key)}`)
+      .join(" ");
+    console.log(
+      `[board] viewport ${viewport?.style.transform ?? "none"}, ${document.querySelectorAll(".react-flow__node").length} nodes drawn (${document.querySelectorAll(".react-flow__node.selected").length} selected), ${stored.length} in the store spanning ${Math.min(...xs)},${Math.min(...ys)} to ${Math.max(...xs)},${Math.max(...ys)}; localStorage ${saved}`,
+    );
+    await window.__screenshot?.();
   });
   await import("./whiteboard");
   const results: Results = {
