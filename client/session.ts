@@ -158,6 +158,11 @@ export class Session {
     return this.state.status;
   }
 
+  // How many calls are waiting for their answer
+  get inFlight() {
+    return this.pending.size;
+  }
+
   // Opens the socket. Idempotent while one is open or opening.
   connect() {
     if (this.stopped || this.ws) return;

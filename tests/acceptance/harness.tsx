@@ -106,23 +106,30 @@ export type PuzzleFixture = {
   sync?: boolean;
 };
 
+// A fixture write, settled once the page's store has what it changed: a
+// Meteor method's promise settled after its writes had reached the client,
+// and the tests lean on that. The change frames are on the page's socket
+// before its round trip's answer.
+async function fixture<T>(body: unknown): Promise<T> {
+  const result = await post<T>("/test/fixture", body);
+  await page?.roundTrip();
+  return result;
+}
+
 // What Jolly Roger's puzzle methods did, written into the service's copies
 // as the feed would bring them.
-export const writePuzzle = (fixture: PuzzleFixture) =>
-  post<{ puzzleId: string }>("/test/fixture", {
-    op: "puzzle",
-    ...fixture,
-  }).then((r) => r.puzzleId);
+export const writePuzzle = (fixture_: PuzzleFixture) =>
+  fixture<{ puzzleId: string }>({ op: "puzzle", ...fixture_ }).then(
+    (r) => r.puzzleId,
+  );
 
 export const fillInkOnBoard = (boardId: string, spare: number) =>
-  post<{ nodeId: string }>("/test/fixture", {
-    op: "fillInk",
-    boardId,
-    spare,
-  }).then((r) => r.nodeId);
+  fixture<{ nodeId: string }>({ op: "fillInk", boardId, spare }).then(
+    (r) => r.nodeId,
+  );
 
 export const clearVersionsOf = (boardId: string) =>
-  post("/test/fixture", { op: "clearVersions", boardId });
+  fixture({ op: "clearVersions", boardId });
 
 export const TEST_BUCKET = {
   bucketName: "jr-test-images",
@@ -328,14 +335,16 @@ export class BoardConnection {
       .catch(() => undefined);
   }
 
-  // Until the socket is open with its welcome, or closed for good
+  // Until the socket is open with its welcome and no call is waiting for
+  // its answer, or the socket is closed for good. Meteor's tests waited for
+  // every subscription to be ready, which took in the data a just-made call
+  // had asked for; here that's the calls themselves.
   async settled() {
     const until = Date.now() + SETTLE_TIMEOUT_MS;
     while (Date.now() < until) {
-      const { status } = this.session;
-      if (status === "open" || status === "closed" || status === "expired") {
-        return;
-      }
+      const { status, inFlight } = this.session;
+      if (status === "closed" || status === "expired") return;
+      if (status === "open" && inFlight === 0) return;
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
     throw new Error(`The session didn't settle (${this.session.status})`);
