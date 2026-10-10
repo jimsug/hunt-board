@@ -90,7 +90,7 @@ describe("test mode", () => {
 
   it("mints a token for any user with the secret", async () => {
     const res = await post(on, "/test/token", {
-      user: "someoneXXXXXXXXX1",
+      user: "someoneXXXXXXXXXj",
       name: "Someone",
       operator: true,
       mayEdit: false,
@@ -98,7 +98,7 @@ describe("test mode", () => {
     assert.equal(res.status, 200);
     const { token } = (await res.json()) as { token: string };
     const claims = verifyToken(token, SECRET);
-    assert.equal(claims.user, "someoneXXXXXXXXX1");
+    assert.equal(claims.user, "someoneXXXXXXXXXj");
     assert.equal(claims.name, "Someone");
     assert.isTrue(claims.operator);
     assert.isFalse(claims.mayEdit);

@@ -8,6 +8,7 @@ import Tags from "lib/models/Tags";
 import WhiteboardNodes from "lib/models/WhiteboardNodes";
 import Whiteboards from "lib/models/Whiteboards";
 import WhiteboardVersions from "lib/models/WhiteboardVersions";
+import { Id } from "lib/typedModel/regexes";
 import { withUser } from "lib/typedModel/userContext";
 import { MAX_INK_POINTS_PER_BOARD } from "lib/whiteboard/limits";
 import { z } from "zod";
@@ -37,7 +38,7 @@ const json = (status: number, body: unknown) =>
 const TOKEN_LIFETIME_MS = 5 * 60 * 1000;
 
 const TokenBody = z.strictObject({
-  user: z.string().min(1),
+  user: z.string().regex(Id),
   name: z.string().min(1).optional(),
   operator: z.boolean().optional(),
   mayEdit: z.boolean().optional(),

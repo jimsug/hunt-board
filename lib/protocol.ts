@@ -1,3 +1,4 @@
+import { Id } from "lib/typedModel/regexes";
 import { z } from "zod";
 import {
   WhiteboardArrowHeads,
@@ -174,11 +175,16 @@ export type MethodArgs<N extends keyof typeof Protocol> = z.infer<
   (typeof Protocol)[N]
 >;
 
-// The token's claims, as Jolly Roger signs them.
+// The token's claims, as Jolly Roger signs them. Hunt, puzzle and user are
+// Jolly Roger's ids, so a token naming anything else is refused at hello
+// rather than failing a write that stamps the user on a document.
 export const ClaimsSchema = z.strictObject({
   v: z.literal(1),
-  scope: z.strictObject({ hunt: z.string(), puzzle: z.string().optional() }),
-  user: z.string(),
+  scope: z.strictObject({
+    hunt: z.string().regex(Id),
+    puzzle: z.string().regex(Id).optional(),
+  }),
+  user: z.string().regex(Id),
   name: z.string(),
   mayEdit: z.boolean(),
   exp: z.number(),
