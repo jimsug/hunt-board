@@ -691,7 +691,8 @@ The helpers at the top of the test file are rewritten for the data layer
   the phone test finds `button[aria-label="✅"]` where it found
   emoji-picker-react's `[data-unified="2705"]`.
 
-Dropped, with the reason:
+Of the source's 204 cases, 184 are kept (186 as run, since the touch
+target test is written for three zooms) and 20 dropped, with the reason:
 
 - `offers operators a button to create the board` and `doesn't offer to
   create a board on an archived hunt`: the create-board page (a board comes
