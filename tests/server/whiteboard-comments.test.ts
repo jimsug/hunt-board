@@ -3,6 +3,7 @@ import { assert } from "chai";
 import type { Claims } from "lib/access";
 import { Random } from "lib/compat/random";
 import BoardComments from "lib/models/BoardComments";
+import Tags from "lib/models/Tags";
 import WhiteboardNodes from "lib/models/WhiteboardNodes";
 import type { WhiteboardNodeInput } from "lib/protocol";
 import { MAX_COMMENT_LENGTH, MAX_REACTION_LENGTH } from "lib/whiteboard/limits";
@@ -613,6 +614,30 @@ describe("whiteboard comments", () => {
         removed.filter((c) => c.id === id),
         [{ collection: "jr_whiteboard_nodes", id, doc: null }],
       );
+    });
+
+    it("tells the room once of an upsert under a pinned id", async () => {
+      const id = Random.id();
+      const tag = {
+        hunt: huntId,
+        name: "group:once",
+        createdAt: new Date(),
+        createdBy: member.user,
+      };
+      const inserted = await heard(() => Tags.upsertAsync({ _id: id }, tag));
+      assert.deepEqual(
+        inserted.map((c) => c.id),
+        [id],
+      );
+      assert.equal(inserted[0]?.doc?.name, "group:once");
+      const replaced = await heard(() =>
+        Tags.upsertAsync({ _id: id }, { ...tag, name: "group:twice" }),
+      );
+      assert.deepEqual(
+        replaced.map((c) => c.id),
+        [id],
+      );
+      assert.equal(replaced[0]?.doc?.name, "group:twice");
     });
 
     it("sends a soft delete as a change with deleted set", async () => {

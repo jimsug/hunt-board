@@ -103,7 +103,12 @@ export function watchModel(model: AnyModel) {
     const before =
       typeof filter._id === "string" ? [filter._id] : await idsMatching(filter);
     const result = await upsertAsync(selector, mod, options);
-    await emit(result.insertedId ? [...before, result.insertedId] : before);
+    // An insert under a pinned id is the id already in before
+    const ids =
+      result.insertedId && !before.includes(result.insertedId)
+        ? [...before, result.insertedId]
+        : before;
+    await emit(ids);
     return result;
   };
   const removeAsync = model.removeAsync.bind(model);
