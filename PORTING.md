@@ -403,7 +403,9 @@ over there and arriving here over DDP.
   Pending calls are rejected on a drop rather than re-sent.
 - `hunts.ts` (`startHuntFeeds`): one subscription pair per hunt with a
   board, `Puzzles.publications.forHunt` (`{ huntId, includeDeleted: true }`,
-  which the server honours for admins) and `Puzzles.publications.forPuzzleList`
+  which the server honours for admins only; the service account stays an
+  ordinary member, so a deleted puzzle stops being published and its card
+  is hidden rather than handed to its `replacedBy`) and `Puzzles.publications.forPuzzleList`
   (`{ huntId }`; the tags come with it, as Jolly Roger has no tags-only
   publication; its bookmarks are ignored). Hunts are found from
   `Whiteboards` at start and from the change seam after (a hunt board
