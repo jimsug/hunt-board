@@ -16,6 +16,10 @@ export interface Config {
   s3ImageBucketName: string | undefined;
   s3ImageBucketRegion: string | undefined;
   feed: FeedConfig;
+  // TEST_MODE=1: the /test/* endpoints the acceptance harness drives
+  // (resetting and reseeding the database, minting tokens, standing in for
+  // Jolly Roger's puzzle writes). Never on in production.
+  testMode: boolean;
 }
 
 // How the feed logs in to Jolly Roger: a resume token, an email and
@@ -119,5 +123,6 @@ export function loadConfig(env: Env = process.env): Config {
     s3ImageBucketName: env.S3_IMAGE_BUCKET_NAME?.trim() || undefined,
     s3ImageBucketRegion: env.S3_IMAGE_BUCKET_REGION?.trim() || undefined,
     feed: feedConfig(env),
+    testMode: env.TEST_MODE?.trim() === "1",
   };
 }

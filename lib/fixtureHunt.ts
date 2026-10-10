@@ -1,3 +1,6 @@
+import Puzzles from "./models/Puzzles";
+import Tags from "./models/Tags";
+
 // Jolly Roger's fixture hunt (Mystery Hunt 2018), as far as the board's
 // tests read it: its tags and puzzles, with the guesses that give each
 // puzzle its answers. Copied from imports/FixtureHunt.ts.
@@ -1116,3 +1119,33 @@ const FixtureHunt: FixtureHuntType = {
 };
 
 export default FixtureHunt;
+
+// Writes the fixture hunt's tags and puzzles into the copies the feed
+// would fill, as createdBy. Safe to run again: existing copies are updated.
+export async function seedFixtureHunt(createdBy: string) {
+  const huntId = FixtureHunt._id;
+  for (const { _id, name } of FixtureHunt.tags) {
+    await Tags.upsertAsync(
+      { _id },
+      { $setOnInsert: { createdBy }, $set: { hunt: huntId, name } },
+    );
+  }
+  for (const puzzle of FixtureHunt.puzzles) {
+    await Puzzles.upsertAsync(
+      { _id: puzzle._id },
+      {
+        $setOnInsert: { createdBy },
+        $set: {
+          hunt: huntId,
+          title: puzzle.title,
+          url: puzzle.url,
+          expectedAnswerCount: puzzle.expectedAnswerCount,
+          tags: puzzle.tags,
+          answers: puzzle.guesses
+            .filter((g) => g.state === "correct")
+            .map((g) => g.guess),
+        },
+      },
+    );
+  }
+}

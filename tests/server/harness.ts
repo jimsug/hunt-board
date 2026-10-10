@@ -4,15 +4,13 @@ import { assert } from "chai";
 import type { Claims } from "lib/access";
 import { Random } from "lib/compat/random";
 import { connect, db, disconnect } from "lib/db";
-import Puzzles from "lib/models/Puzzles";
-import Tags from "lib/models/Tags";
+import FixtureHunt, { seedFixtureHunt } from "lib/fixtureHunt";
 import ensureIndexes from "lib/typedModel/ensureIndexes";
 import type { FlagName } from "../../server/flags";
 import Flags from "../../server/flags";
 import type { CallContext } from "../../server/methods";
 import { callMethod } from "../../server/methods";
 import { deferredSyncsDone } from "../../server/whiteboard";
-import FixtureHunt from "./fixtureHunt";
 
 // What the server tests share: the scratch Mongo, the fixture hunt's copies,
 // claims in place of Jolly Roger's users, and the odd assertion helper.
@@ -83,32 +81,8 @@ export const archived = (claims: Claims): Claims => ({
 });
 
 // The fixture hunt's tags and puzzles, into the copies the feed will fill.
-export async function makeFixtureHunt(createdBy: string) {
-  for (const { _id, name } of FixtureHunt.tags) {
-    await Tags.upsertAsync(
-      { _id },
-      { $setOnInsert: { createdBy }, $set: { hunt: huntId, name } },
-    );
-  }
-  for (const puzzle of FixtureHunt.puzzles) {
-    await Puzzles.upsertAsync(
-      { _id: puzzle._id },
-      {
-        $setOnInsert: { createdBy },
-        $set: {
-          hunt: huntId,
-          title: puzzle.title,
-          url: puzzle.url,
-          expectedAnswerCount: puzzle.expectedAnswerCount,
-          tags: puzzle.tags,
-          answers: puzzle.guesses
-            .filter((g) => g.state === "correct")
-            .map((g) => g.guess),
-        },
-      },
-    );
-  }
-}
+export const makeFixtureHunt = (createdBy: string) =>
+  seedFixtureHunt(createdBy);
 
 // A call as the client makes it, checked against its schema
 export const call = (

@@ -2,6 +2,7 @@ import { afterAll, beforeAll, beforeEach, describe, it } from "bun:test";
 import { assert } from "chai";
 import type { Claims } from "lib/access";
 import { Random } from "lib/compat/random";
+import FixtureHunt from "lib/fixtureHunt";
 import Puzzles from "lib/models/Puzzles";
 import WhiteboardEdges from "lib/models/WhiteboardEdges";
 import WhiteboardNodes from "lib/models/WhiteboardNodes";
@@ -15,7 +16,6 @@ import {
 } from "../../server/whiteboardEdits";
 import { resetLayout } from "../../server/whiteboardReset";
 import { restoreItems, restoreVersion } from "../../server/whiteboardVersions";
-import FixtureHunt from "./fixtureHunt";
 import {
   archived,
   call,

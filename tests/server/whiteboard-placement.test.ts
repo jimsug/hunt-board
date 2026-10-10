@@ -2,6 +2,7 @@ import { afterAll, beforeAll, beforeEach, describe, it, spyOn } from "bun:test";
 import { assert } from "chai";
 import type { Claims } from "lib/access";
 import { Random } from "lib/compat/random";
+import FixtureHunt from "lib/fixtureHunt";
 import BoardComments from "lib/models/BoardComments";
 import Puzzles from "lib/models/Puzzles";
 import Tags from "lib/models/Tags";
@@ -36,7 +37,6 @@ import {
   upsertNodes,
 } from "../../server/whiteboardEdits";
 import { decodeVersion, restoreVersion } from "../../server/whiteboardVersions";
-import FixtureHunt from "./fixtureHunt";
 import { otherHuntBoard } from "./fixtures";
 import {
   archived,

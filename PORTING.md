@@ -254,7 +254,7 @@ Roger's puzzle and tag methods are direct writes to the copies plus
 `deferSyncPuzzlesOnBoard`, chat is `server/comments.ts`, `assert.isRejected`
 is `rejects`, sinon is `spyOn` (`spyOnMethod` for generic methods) and
 `fakeNow` stands in for fake timers. The fixture hunt's tags and puzzles
-are `tests/server/fixtureHunt.ts`.
+are `lib/fixtureHunt.ts`.
 
 Of the source's 285 cases, 243 are here (226 under their own titles, 17
 adapted to the room API or the feed and retitled), 8 are new (a puzzle's

@@ -1,5 +1,5 @@
+import FixtureHunt, { seedFixtureHunt } from "../lib/fixtureHunt";
 import { signToken } from "../server/token";
-import FixtureHunt from "../tests/server/fixtureHunt";
 
 // Fills a running service with the fixture hunt's tags and puzzles (which
 // the feed will bring once it exists), asks it for the hunt's board, and
@@ -9,8 +9,6 @@ import FixtureHunt from "../tests/server/fixtureHunt";
 //   MONGO_URL=... JR_SHARED_SECRET=... bun run scripts/seed-dev.ts [service url]
 
 import { connect, disconnect } from "../lib/db";
-import Puzzles from "../lib/models/Puzzles";
-import Tags from "../lib/models/Tags";
 import { withUser } from "../lib/typedModel/userContext";
 
 const serviceUrl = process.argv[2] ?? "http://127.0.0.1:3100";
@@ -23,32 +21,7 @@ const SEEDER = "seedScriptXXXXXX2";
 const huntId = FixtureHunt._id;
 
 await connect(mongoUrl);
-await withUser(SEEDER, async () => {
-  for (const { _id, name } of FixtureHunt.tags) {
-    await Tags.upsertAsync(
-      { _id },
-      { $setOnInsert: { createdBy: SEEDER }, $set: { hunt: huntId, name } },
-    );
-  }
-  for (const puzzle of FixtureHunt.puzzles) {
-    await Puzzles.upsertAsync(
-      { _id: puzzle._id },
-      {
-        $setOnInsert: { createdBy: SEEDER },
-        $set: {
-          hunt: huntId,
-          title: puzzle.title,
-          url: puzzle.url,
-          expectedAnswerCount: puzzle.expectedAnswerCount,
-          tags: puzzle.tags,
-          answers: puzzle.guesses
-            .filter((g) => g.state === "correct")
-            .map((g) => g.guess),
-        },
-      },
-    );
-  }
-});
+await withUser(SEEDER, () => seedFixtureHunt(SEEDER));
 await disconnect();
 
 const response = await fetch(`${serviceUrl}/boards`, {

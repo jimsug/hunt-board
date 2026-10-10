@@ -1,11 +1,13 @@
 import { timingSafeEqual } from "node:crypto";
 import path from "node:path";
 import { isServiceError } from "lib/compat/error";
+import FixtureHunt from "lib/fixtureHunt";
 import Whiteboards from "lib/models/Whiteboards";
 import { z } from "zod";
 import type { Config } from "./config";
 import Logger from "./logger";
 import { activityOf } from "./rooms";
+import { createTestHandler } from "./testMode";
 import { deleteBoard, ensureBoard } from "./whiteboard";
 
 // What the service answers over plain HTTP: the API Jolly Roger calls with
@@ -61,6 +63,8 @@ export function createHttpHandler({ config, distDir = DIST_DIR }: HttpOptions) {
   }
 
   const boardUrl = (id: string) => `${config.publicUrl}/boards/${id}`;
+  // Answers nothing unless TEST_MODE=1
+  const testRoutes = createTestHandler({ config, huntId: FixtureHunt._id });
 
   async function createBoard(req: Request): Promise<Response> {
     let body: unknown;
@@ -120,6 +124,9 @@ export function createHttpHandler({ config, distDir = DIST_DIR }: HttpOptions) {
     const url = new URL(req.url);
     const { pathname } = url;
     const { method } = req;
+
+    const test = await testRoutes(req);
+    if (test) return test;
 
     if (pathname === "/healthz") {
       return method === "GET" || method === "HEAD"
