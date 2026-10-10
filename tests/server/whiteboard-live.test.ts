@@ -40,6 +40,7 @@ import {
   archived,
   call,
   claimsFor,
+  defaultRoleOperator,
   fakeNow,
   huntId,
   makeFixtureHunt,
@@ -918,9 +919,13 @@ describe("whiteboard live", () => {
     });
 
     describe("setEditPolicy", () => {
-      it("is for operators", async () => {
+      it("is for the hunt's assigned operators", async () => {
         await rejects(setPolicy(member, "operators"), /assigned operators/);
         await rejects(setPolicy(outsider, "operators"), /member/);
+        // An operator by the hunt's default role edits under an
+        // operators-only policy but can't set one
+        const byRole = defaultRoleOperator(operator);
+        await rejects(setPolicy(byRole, "operators"), /assigned operators/);
         assert.isUndefined(
           (await Whiteboards.findOneAsync(boardId))?.editPolicy,
         );
@@ -929,6 +934,13 @@ describe("whiteboard live", () => {
         assert.equal(
           (await Whiteboards.findOneAsync(boardId))?.editPolicy,
           "operators",
+        );
+        const theirs = stickyInput(1, 1);
+        await upsertNodes(byRole, boardId, [theirs]);
+        assert.isOk(await node(theirs._id));
+        await rejects(
+          upsertNodes(member, boardId, [stickyInput(2, 2)]),
+          /operators/,
         );
         await setPolicy(operator, "members");
         assert.equal(

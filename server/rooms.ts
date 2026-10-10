@@ -1,5 +1,5 @@
 import type { Claims } from "lib/access";
-import { boardAccess, isOperator } from "lib/access";
+import { boardAccess, isAssignedOperator, isOperator } from "lib/access";
 import { ServiceError } from "lib/compat/error";
 import BoardComments from "lib/models/BoardComments";
 import Puzzles from "lib/models/Puzzles";
@@ -251,6 +251,7 @@ function welcomeFor(
     mayEdit: claims.mayEdit,
     access: boardAccess(claims, room.live.board).access,
     operator: isOperator(claims),
+    assignedOperator: isAssignedOperator(claims),
     board: room.id,
     connection: member.id,
     ...(snap ? { snapshot: snap } : {}),

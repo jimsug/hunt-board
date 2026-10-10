@@ -114,14 +114,19 @@ source.
 ## `lib/access.ts` and `lib/protocol.ts`: access and call shapes
 
 - `lib/access.ts` is new: `Claims` (the token's `{ v, scope, user, name,
-  mayEdit, exp, operator? }`), `boardAccess(claims, board)` returning edit,
-  comment, view or none, `scopeMatches`, `isOperator` and `SERVICE_USER`,
-  the id the service writes under when no person asked (seeding a board).
-  It stands in for `whiteboardAccess(user, hunt, board)`: a scope that
-  doesn't match the board is "none", `mayEdit: false` (Jolly Roger's
-  archived hunt) is "view", and the edit policy decides the rest. "Operator"
-  is `claims.operator === true`; Jolly Roger told its assigned operators
-  from default-role ones (`userMayMakeOperatorForHunt`), the token doesn't.
+  mayEdit, exp, operator?, assignedOperator? }`), `boardAccess(claims,
+  board)` returning edit, comment, view or none, `scopeMatches`,
+  `isOperator`, `isAssignedOperator` and `SERVICE_USER`, the id the service
+  writes under when no person asked (seeding a board). It stands in for
+  `whiteboardAccess(user, hunt, board)`: a scope that doesn't match the
+  board is "none", `mayEdit: false` (Jolly Roger's archived hunt) is
+  "view", and the edit policy decides the rest. "Operator" is
+  `claims.operator === true`, for the policies that single operators out;
+  "assigned operator" is `claims.assignedOperator === true`, Jolly Roger's
+  `userMayMakeOperatorForHunt` (an operator by assignment rather than the
+  hunt's default role), which alone may change who edits
+  (`setEditPolicy`) or lock the layout (`setLayoutLocked`). A token with
+  `operator` alone edits under an operators-only policy but can't set one.
 - `lib/protocol.ts` is new: one Zod schema per call, mirroring the methods'
   `check()` patterns (`z.strictObject`, so an unknown key is refused as
   `check` refused it) without the `boardId`, which is the socket's. The
@@ -361,8 +366,9 @@ New, to the service design; nothing here has a Jolly Roger counterpart.
   it on SIGTERM or SIGINT before disconnecting.
 
 Where this departs from the design document: EJSON frames; `welcome` also
-carries `access` (what the policy makes of the token now), `operator` and
-`connection` (the socket's id, which its own presence carries), and has no
+carries `access` (what the policy makes of the token now), `operator`,
+`assignedOperator` and `connection` (the socket's id, which its own
+presence carries), and has no
 `snapshot` on a renewal; `live` isn't echoed to its sender; errors outside
 a call have `id: null`; the page lives at `/boards/:id`.
 

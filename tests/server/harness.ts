@@ -41,18 +41,21 @@ export async function resetDatabase() {
 }
 
 // A token's claims for someone on the fixture hunt's board, or elsewhere.
+// An operator is an assigned one unless the test says otherwise.
 export function claimsFor(
   user: string,
   {
     hunt = huntId,
     puzzle,
     operator = false,
+    assignedOperator = operator,
     mayEdit = true,
     name,
   }: {
     hunt?: string;
     puzzle?: string;
     operator?: boolean;
+    assignedOperator?: boolean;
     mayEdit?: boolean;
     name?: string;
   } = {},
@@ -65,8 +68,16 @@ export function claimsFor(
     mayEdit,
     exp: Date.now() + 5 * 60 * 1000,
     ...(operator ? { operator: true } : {}),
+    ...(assignedOperator ? { assignedOperator: true } : {}),
   };
 }
+
+// The same person as an operator by the hunt's default role only, who can
+// edit under an operators-only policy but not change who edits
+export const defaultRoleOperator = (claims: Claims): Claims => {
+  const { assignedOperator: _a, ...rest } = claims;
+  return rest;
+};
 
 // A new person in the hunt, an operator when asked. Jolly Roger made an
 // account; here a person is only their claims.

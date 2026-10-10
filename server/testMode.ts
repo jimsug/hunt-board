@@ -41,6 +41,7 @@ const TokenBody = z.strictObject({
   user: z.string().regex(Id),
   name: z.string().min(1).optional(),
   operator: z.boolean().optional(),
+  assignedOperator: z.boolean().optional(),
   mayEdit: z.boolean().optional(),
   scope: z
     .strictObject({ hunt: z.string().min(1), puzzle: z.string().optional() })
@@ -224,6 +225,7 @@ export function createTestHandler({ config, huntId }: TestModeOptions) {
           mayEdit: parsed.data.mayEdit ?? true,
           exp: Date.now() + TOKEN_LIFETIME_MS,
           ...(parsed.data.operator ? { operator: true } : {}),
+          ...(parsed.data.assignedOperator ? { assignedOperator: true } : {}),
         };
         return json(200, { token: signToken(claims, config.jrSharedSecret) });
       }

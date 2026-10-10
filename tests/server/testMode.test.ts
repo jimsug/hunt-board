@@ -101,8 +101,20 @@ describe("test mode", () => {
     assert.equal(claims.user, "someoneXXXXXXXXXj");
     assert.equal(claims.name, "Someone");
     assert.isTrue(claims.operator);
+    assert.notProperty(claims, "assignedOperator");
     assert.isFalse(claims.mayEdit);
     assert.deepEqual(claims.scope, { hunt: huntId });
+
+    const assigned = await post(on, "/test/token", {
+      user: "someoneXXXXXXXXXj",
+      operator: true,
+      assignedOperator: true,
+    });
+    assert.equal(assigned.status, 200);
+    const { token: assignedToken } = (await assigned.json()) as {
+      token: string;
+    };
+    assert.isTrue(verifyToken(assignedToken, SECRET).assignedOperator);
 
     const bad = await post(on, "/test/token", { nope: true });
     assert.equal(bad.status, 400);

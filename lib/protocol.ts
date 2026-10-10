@@ -200,6 +200,7 @@ export const ClaimsSchema = z.strictObject({
   mayEdit: z.boolean(),
   exp: z.number(),
   operator: z.boolean().optional(),
+  assignedOperator: z.boolean().optional(),
 });
 
 // The websocket frames, one EJSON object each (dates and binary cross the
@@ -255,6 +256,8 @@ export interface Welcome {
   mayEdit: boolean;
   access: "edit" | "comment" | "view" | "none";
   operator: boolean;
+  // May change who edits and lock the layout (see lib/access.ts)
+  assignedOperator: boolean;
   // The board's id
   board: string;
   // This socket's connection id, which its own presence carries

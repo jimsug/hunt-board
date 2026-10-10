@@ -13,6 +13,7 @@ import { zigzag } from "./fixtures";
 import {
   archived,
   claimsFor,
+  defaultRoleOperator,
   huntId,
   makeFixtureHunt,
   makeUser,
@@ -152,6 +153,10 @@ describe("ws", () => {
       assert.equal(viewer.welcome.access, "view");
       const op = await join(operator);
       assert.isTrue(op.welcome.operator);
+      assert.isTrue(op.welcome.assignedOperator);
+      const byRole = await join(defaultRoleOperator(operator));
+      assert.isTrue(byRole.welcome.operator);
+      assert.isFalse(byRole.welcome.assignedOperator);
     });
 
     it("leaves the puzzle copies off a puzzle's board", async () => {

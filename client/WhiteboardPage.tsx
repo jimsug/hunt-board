@@ -87,6 +87,7 @@ const WhiteboardPage = ({ session }: { session: Session }) => {
     accessReason = "narrow";
   }
   const isOperator = current?.operator ?? false;
+  const isAssignedOperator = current?.assignedOperator ?? false;
 
   // Ink is left out of the snapshot for a viewer who hides it, which takes
   // a fresh socket.
@@ -202,7 +203,7 @@ const WhiteboardPage = ({ session }: { session: Session }) => {
             huntId={board.hunt}
             access={access}
             accessReason={accessReason}
-            mayChangeEditPolicy={isOperator && access !== "view"}
+            mayChangeEditPolicy={isAssignedOperator && access !== "view"}
             editPolicy={editPolicy}
             editors={board.editors ?? []}
             isOperator={isOperator}

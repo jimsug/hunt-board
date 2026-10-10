@@ -41,7 +41,8 @@ export const navigation = {
 };
 
 // Who the tests are. Jolly Roger made accounts; here a person is a token's
-// claims, with Meteor-style ids so the models take them as createdBy.
+// claims, with Meteor-style ids so the models take them as createdBy. An
+// operator is an assigned one, as the fixture hunt's was.
 export interface Person {
   user: string;
   name: string;
@@ -90,6 +91,7 @@ const mintToken = (person: Person, name = person.name) =>
     user: person.user,
     name,
     operator: person.operator ?? false,
+    assignedOperator: person.operator ?? false,
     mayEdit: !huntArchived,
   }).then((r) => r.token);
 

@@ -1,5 +1,5 @@
 import type { Claims } from "lib/access";
-import { isOperator } from "lib/access";
+import { isAssignedOperator, isOperator } from "lib/access";
 import { ServiceError } from "lib/compat/error";
 import Puzzles from "lib/models/Puzzles";
 import type { WhiteboardEdgeType } from "lib/models/WhiteboardEdges";
@@ -1195,7 +1195,8 @@ export async function deleteEdges(
 }
 
 // Locks or unlocks every frame on the board at once, seeded and hand-made,
-// for operators settling the map. Locking takes the frames on show that
+// for the hunt's assigned operators settling the map (the same people who
+// may change who edits). Locking takes the frames on show that
 // aren't locked yet, with the caller as their locker: a frame already locked
 // keeps its locker, and one taken off the board stays unlocked so it can be
 // put back. Unlocking takes every locked frame. Records no version, since it
@@ -1207,7 +1208,7 @@ export async function setLayoutLocked(
 ) {
   const userId = claims.user;
   await assertMayEditBoard(claims, boardId);
-  if (!isOperator(claims)) {
+  if (!isAssignedOperator(claims)) {
     throw new ServiceError(403, "Only operators can lock or unlock the layout");
   }
   await withBoardLock(boardId, async () => {

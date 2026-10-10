@@ -106,6 +106,7 @@ describe("Session", () => {
     const [welcome] = seen.welcomes;
     assert.equal(welcome?.user, operator.user);
     assert.isTrue(welcome?.operator);
+    assert.isTrue(welcome?.assignedOperator);
     assert.isDefined(welcome?.snapshot);
     assert.isAbove(welcome?.snapshot?.nodes.length ?? 0, 0);
     assert.deepEqual(welcome?.flags, []);

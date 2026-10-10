@@ -366,12 +366,12 @@ interface CanvasProps {
   // isn't more.
   access: WhiteboardAccess;
   accessReason: WhiteboardAccessReason | undefined;
-  // Whether to offer the who-can-edit dialog, and what the board is set to.
+  // Whether to offer the who-can-edit dialog and the layout lock (the
+  // hunt's assigned operators), and what the board is set to.
   mayChangeEditPolicy: boolean;
   editPolicy: WhiteboardEditPolicy;
   editors: string[];
-  // An operator (or admin), who can unlock anyone's lock and lock or unlock
-  // every frame at once.
+  // An operator (or admin), who can unlock anyone's lock.
   isOperator: boolean;
   // Off on a phone, where it would cover half the board.
   showMiniMap: boolean;
@@ -3546,7 +3546,7 @@ const CanvasInner = ({
                           {historyOn && (
                             <ResetLayoutButton onClick={openResetLayout} />
                           )}
-                          {isOperator && (
+                          {mayChangeEditPolicy && (
                             <LockLayoutButtons
                               boardId={boardId}
                               onRefused={reportRefusal}

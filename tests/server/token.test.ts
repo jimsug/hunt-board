@@ -20,6 +20,7 @@ describe("token", () => {
     mayEdit: true,
     exp: now + 60 * 1000,
     operator: true,
+    assignedOperator: true,
   });
 
   const fails = (token: string, match: RegExp, at = now) => {
@@ -42,11 +43,12 @@ describe("token", () => {
   });
 
   it("leaves an absent puzzle and operator absent", () => {
-    const { operator: _o, ...rest } = claims();
+    const { operator: _o, assignedOperator: _a, ...rest } = claims();
     const original: Claims = { ...rest, scope: { hunt: rest.scope.hunt } };
     const verified = verifyToken(signToken(original, secret), secret, now);
     assert.deepEqual(verified, original);
     assert.notProperty(verified, "operator");
+    assert.notProperty(verified, "assignedOperator");
     assert.notProperty(verified.scope, "puzzle");
   });
 

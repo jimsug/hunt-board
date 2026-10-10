@@ -19,6 +19,7 @@ import { restoreItems, restoreVersion } from "../../server/whiteboardVersions";
 import {
   archived,
   call,
+  defaultRoleOperator,
   huntId,
   makeFixtureHunt,
   makeUser,
@@ -650,9 +651,13 @@ describe("whiteboard locks", () => {
       assert.notOk((await node(angerFrame)).hidden);
     });
 
-    it("is refused for a plain member, a non-member and on an archived hunt", async () => {
+    it("is refused for a plain member, a default-role operator, a non-member and on an archived hunt", async () => {
       await rejects(
         setLayout(member, true),
+        /Only operators can lock or unlock the layout/,
+      );
+      await rejects(
+        setLayout(defaultRoleOperator(operator), true),
         /Only operators can lock or unlock the layout/,
       );
       const outsider = { ...makeUser(), scope: { hunt: Random.id() } };

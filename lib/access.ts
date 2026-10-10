@@ -21,6 +21,11 @@ export interface Claims {
   // An operator of the hunt, for the edit policies that single them out.
   // Jolly Roger sets it; absent means a plain member.
   operator?: boolean;
+  // An operator by assignment rather than by the hunt's default role
+  // (Jolly Roger's userMayMakeOperatorForHunt), who alone may change who
+  // edits or lock the layout: on a hunt that makes every member an
+  // operator, any member could otherwise lock everyone else out.
+  assignedOperator?: boolean;
 }
 
 export type BoardAccess = "edit" | "comment" | "view" | "none";
@@ -35,6 +40,9 @@ export const SERVICE_USER = "huntboardservice2";
 
 export const isOperator = (claims: Pick<Claims, "operator">) =>
   claims.operator === true;
+
+export const isAssignedOperator = (claims: Pick<Claims, "assignedOperator">) =>
+  claims.assignedOperator === true;
 
 export function scopeMatches(
   scope: BoardScope,
