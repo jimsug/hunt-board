@@ -388,9 +388,9 @@ a call have `id: null`; the page lives at `/boards/:id`.
 
 `tests/server/service.ts` starts the service on port 0 against the
 scratch Mongo and wraps a Bun `WebSocket` as `TestClient` (`hello`, `call`,
-`next`, `none`, `closed`). `token.test.ts` (9), `config.test.ts` (7), `http.test.ts` (15),
-`ws.test.ts` (26) and `rooms.test.ts` (7) cover what the design asks for;
-64 cases in all. `ddp.test.ts` (8) runs the DDP client against a fake
+`next`, `none`, `closed`). `token.test.ts` (9), `config.test.ts` (8), `http.test.ts` (17),
+`ws.test.ts` (29), `rooms.test.ts` (9) and `app.test.ts` (2, the prune
+timer) cover what the design asks for; 74 cases in all. `ddp.test.ts` (8) runs the DDP client against a fake
 socket (`fakeDdp.ts`), `hunt-feeds.test.ts` runs the hunt feed against the
 same fake (a full send, a reconnect's resend written only where it
 changed), and `feed.test.ts` has one case without a server (`FEED=off`) and
