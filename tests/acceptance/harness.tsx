@@ -1,3 +1,4 @@
+import { topNavigation } from "client/compat/router";
 import { setSession, setWhiteboardLive } from "client/methods";
 import type { LiveBroadcast } from "client/session";
 import { Session } from "client/session";
@@ -24,6 +25,20 @@ import { ThemeProvider } from "styled-components";
 // writes it stands in for, and the page itself.
 
 export const huntId = FixtureHunt._id;
+
+// Jolly Roger's origin as tests/acceptance/serve.ts configures it, which
+// the welcome carries as jrUrl
+export const JR_URL = "http://jr.example.test";
+
+// Where the board sent the top window, had this page been able to leave
+const visits: string[] = [];
+topNavigation.go = (url) => {
+  visits.push(url);
+};
+export const navigation = {
+  // The visits since last asked
+  went: () => visits.splice(0),
+};
 
 // Who the tests are. Jolly Roger made accounts; here a person is a token's
 // claims, with Meteor-style ids so the models take them as createdBy.
@@ -142,6 +157,8 @@ export class BoardConnection {
   presence = new Collection<PresenceDoc>("their-presence");
   private welcomeWaiters: (() => void)[] = [];
   private name: string;
+  // Opening or reopening the socket, so calls wait for it
+  private opening: Promise<void> | undefined;
 
   private constructor(
     readonly person: Person,
@@ -149,7 +166,11 @@ export class BoardConnection {
     token: string,
   ) {
     this.name = person.name;
-    this.session = new Session({
+    this.session = this.openSession(token);
+  }
+
+  private openSession(token: string): Session {
+    const session = new Session({
       url: socketUrl,
       token,
       initialBackoffMs: 100,
@@ -159,32 +180,62 @@ export class BoardConnection {
       },
       handlers: {
         welcome: (message) => {
-          if (isPage) {
+          if (this.isPage) {
             applyWelcome(message);
             welcome.set({ ...message, snapshot: undefined });
           }
           this.welcomeWaiters.splice(0).forEach((resolve) => resolve());
         },
         change: (change) => {
-          if (isPage) applyChange(change);
+          if (this.isPage) applyChange(change);
         },
         live: (live) => this.onLive(live),
         presence: (message) => this.onPresence(message),
         state: (state) => {
-          if (isPage) connection.set(state);
+          if (this.isPage) connection.set(state);
         },
       },
     });
+    if (this.isPage) setSession(session);
+    return session;
   }
 
   static async open(person: Person, isPage: boolean) {
     const token = await mintToken(person);
     const opened = new BoardConnection(person, isPage, token);
-    if (isPage) setSession(opened.session);
-    const welcomed = opened.nextWelcome();
-    opened.session.connect();
-    await welcomed;
+    await opened.connect();
     return opened;
+  }
+
+  private connect() {
+    const welcomed = this.nextWelcome();
+    this.session.connect();
+    this.opening = welcomed.finally(() => {
+      this.opening = undefined;
+    });
+    return this.opening;
+  }
+
+  // Jolly Roger's presence subscription put a connection on the board and
+  // its stop took it off; here a socket on the board is just that. Joining
+  // once already joined is nothing; stopping leaves (the socket closes,
+  // and the next call or join opens another).
+  join(): { stop: () => void } {
+    if (this.session.status === "closed") void this.rejoin();
+    return { stop: () => this.leave() };
+  }
+
+  async rejoin() {
+    if (this.opening) return this.opening;
+    if (this.session.status !== "closed") return;
+    const token = await mintToken(this.person, this.name);
+    this.session = this.openSession(token);
+    await this.connect();
+  }
+
+  leave() {
+    this.session.close();
+    this.presence.replaceAll([]);
   }
 
   private boardId() {
@@ -238,10 +289,15 @@ export class BoardConnection {
   // A call as this person, in the shape the tests made them: the boardId
   // Jolly Roger's methods took is dropped, and setWhiteboardLive is a live
   // frame rather than a call.
-  call(name: string, args: unknown): Promise<unknown> {
+  async call(name: string, args: unknown): Promise<unknown> {
+    await this.rejoin();
     if (name === setWhiteboardLive.name) {
       this.session.sendLive(stripBoard(args) as WhiteboardLiveState);
       return this.roundTrip();
+    }
+    if (name === "updateProfile") {
+      const { displayName } = args as { displayName: string };
+      return this.renew(displayName);
     }
     return this.session.call(name, stripBoard(args));
   }
@@ -350,6 +406,7 @@ export function boardContainer() {
   container.style.position = "fixed";
   container.style.inset = "0";
   container.style.background = "white";
-  document.body.appendChild(container);
+  // Ahead of the report, so a failure's DOM dump starts with the board
+  document.body.insertBefore(container, document.body.firstChild);
   return container;
 }

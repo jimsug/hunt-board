@@ -26,6 +26,8 @@ export interface Results {
 declare global {
   interface Window {
     __results?: Results;
+    // The driver's, when there is one: a screenshot of the page as it is
+    __screenshot?: () => Promise<void>;
   }
 }
 
@@ -51,6 +53,11 @@ const errorText = (error: unknown) =>
     : String(error);
 
 async function main() {
+  // Registered before the tests (and Testing Library's own cleanup), so a
+  // failed test is pictured with its board still up
+  afterEach(async function () {
+    if (this.currentTest?.state === "failed") await window.__screenshot?.();
+  });
   await import("./whiteboard");
   const results: Results = {
     passes: [],

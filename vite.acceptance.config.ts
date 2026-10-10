@@ -17,7 +17,12 @@ export default mergeConfig(
     // development build only (the script passes --mode development too, as
     // the build's NODE_ENV follows the command line)
     mode: "development",
-    define: { "process.env.NODE_ENV": JSON.stringify("development") },
+    define: {
+      "process.env.NODE_ENV": JSON.stringify("development"),
+      // Testing Library's DOM dump on a failure, long enough to show the
+      // board's toolbar and panels
+      "process.env.DEBUG_PRINT_LIMIT": JSON.stringify("60000"),
+    },
     build: {
       outDir: path.join(root, "dist-acceptance"),
       emptyOutDir: true,

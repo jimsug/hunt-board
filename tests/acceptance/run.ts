@@ -1,5 +1,6 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
+import { mkdir, rm } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
@@ -29,6 +30,8 @@ interface Results {
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, "../..");
 const RUN_TIMEOUT_MS = 60 * 60 * 1000;
+// Screenshots of each failure, numbered in order, under here
+const screenshotDir = path.join(root, "dist-acceptance/failures");
 const READY_TIMEOUT_MS = 30 * 1000;
 
 function option(name: string): string | undefined {
@@ -85,12 +88,15 @@ async function main(): Promise<number> {
       "No dist-acceptance/: run `bun run build:acceptance` first",
     );
   }
+  await rm(screenshotDir, { recursive: true, force: true });
+  await mkdir(screenshotDir, { recursive: true });
   const { url, child } = await startService();
   const browser = await chromium.launch({ headless: !headed });
   try {
     const page = await browser.newPage({
       viewport: { width: 1280, height: 720 },
     });
+    let failures = 0;
     page.on("console", (message) => {
       const text = message.text();
       // The tests' own reporting is [pass]/[fail]/[skip]; everything else is
@@ -99,6 +105,14 @@ async function main(): Promise<number> {
         ? ""
         : `[${message.type()}] `;
       process.stdout.write(`${prefix}${text}\n`);
+    });
+    // What the page showed when a test failed: the runner calls this from
+    // its afterEach, before Testing Library's cleanup takes the board down
+    await page.exposeFunction("__screenshot", async () => {
+      failures += 1;
+      const file = path.join(screenshotDir, `${failures}.png`);
+      await page.screenshot({ path: file });
+      process.stdout.write(`[screenshot] ${file}\n`);
     });
     page.on("pageerror", (error) => {
       process.stdout.write(`[pageerror] ${error.message}\n`);
