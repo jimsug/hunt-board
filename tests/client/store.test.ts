@@ -14,6 +14,7 @@ interface Doc {
   n?: number;
   at?: Date;
   nested?: { kind?: string };
+  content?: { children: { text: string }[] };
   deleted?: boolean;
 }
 
@@ -274,6 +275,38 @@ describe("Collection changes", () => {
   });
 });
 
+describe("dotted paths through arrays", () => {
+  const docs = fill([
+    { _id: "a", content: { children: [{ text: "hello" }, { text: "there" }] } },
+    { _id: "b", content: { children: [{ text: "bye" }] } },
+    { _id: "c", content: { children: [] } },
+  ]);
+  it("matches any element's field, as Mongo does", () => {
+    expect(
+      ids(docs.find({ "content.children.text": "there" }).fetch()),
+    ).toEqual(["a"]);
+    expect(
+      ids(
+        docs.find({ "content.children.text": { $in: ["bye", "x"] } }).fetch(),
+      ),
+    ).toEqual(["b"]);
+    expect(
+      ids(docs.find({ "content.children.0.text": "hello" }).fetch()),
+    ).toEqual(["a"]);
+  });
+  it("reads $ne and $exists against every element", () => {
+    expect(
+      ids(docs.find({ "content.children.text": { $ne: "hello" } }).fetch()),
+    ).toEqual(["b", "c"]);
+    expect(
+      ids(docs.find({ "content.children.text": { $exists: false } }).fetch()),
+    ).toEqual(["c"]);
+    expect(
+      ids(docs.find({ "content.children.text": { $exists: true } }).fetch()),
+    ).toEqual(["a", "b"]);
+  });
+});
+
 describe("createTrackerStore", () => {
   it("runs again when a collection it read changes, and not otherwise", () => {
     const docs = fill([{ _id: "a", n: 1 }]);
@@ -311,6 +344,25 @@ describe("createTrackerStore", () => {
     docs.set({ _id: "a", n: 2 });
     expect(store.getSnapshot()).not.toBe(first);
     expect(store.getSnapshot()[0]?.n).toBe(2);
+  });
+
+  it("hands on a new Map or Set rather than reading them as equal", () => {
+    const docs = fill([{ _id: "a", n: 1 }]);
+    const store = createTrackerStore(
+      () =>
+        new Map(
+          docs
+            .find()
+            .fetch()
+            .map((doc) => [doc._id, doc.n]),
+        ),
+    );
+    store.subscribe(() => {});
+    const first = store.getSnapshot();
+    expect(first.get("a")).toBe(1);
+    docs.set({ _id: "a", n: 2 });
+    expect(store.getSnapshot()).not.toBe(first);
+    expect(store.getSnapshot().get("a")).toBe(2);
   });
 
   it("takes a comparator of its own", () => {

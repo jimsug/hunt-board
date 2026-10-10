@@ -53,14 +53,47 @@ const isOperatorObject = (value: unknown): value is Record<string, unknown> =>
   Object.keys(value).length > 0 &&
   Object.keys(value).every((key) => key.startsWith("$"));
 
-function getPath(doc: unknown, path: string): unknown {
-  let value: unknown = doc;
-  for (const part of path.split(".")) {
-    if (!isPlainObject(value)) return undefined;
-    value = value[part];
+// The values a dotted path reaches. Through an array it reaches each
+// element's, as Mongo reads "content.children.text" (a numeric part picks
+// one element instead); `branched` says that happened, since a condition
+// then holds if any of them meets it (or, for $ne, $nin and $exists: false,
+// if none fails it).
+function pathValues(
+  value: unknown,
+  parts: string[],
+  from = 0,
+): { values: unknown[]; branched: boolean } {
+  if (from === parts.length) return { values: [value], branched: false };
+  const part = parts[from]!;
+  if (Array.isArray(value)) {
+    if (/^\d+$/.test(part)) {
+      return pathValues(value[Number(part)], parts, from + 1);
+    }
+    const values = value.flatMap((item) =>
+      isPlainObject(item) ? pathValues(item, parts, from).values : [],
+    );
+    return { values, branched: true };
   }
-  return value;
+  if (!isPlainObject(value)) return { values: [undefined], branched: false };
+  return pathValues(value[part], parts, from + 1);
 }
+
+function getPath(doc: unknown, path: string): unknown {
+  const { values, branched } = pathValues(doc, path.split("."));
+  return branched ? new Branched(values) : values[0];
+}
+
+// What a path that went through an array reached: one value per element
+class Branched {
+  constructor(readonly values: unknown[]) {}
+}
+
+// Whether the condition is met when none of the values fails it, rather
+// than when any meets it
+const holdsForAll = (operator: string, argument: unknown) =>
+  operator === "$ne" ||
+  operator === "$nin" ||
+  (operator === "$exists" && !argument);
 
 // Mongo's equality: a field holding an array matches a value found in it.
 function equalsOrContains(value: unknown, target: unknown): boolean {
@@ -106,6 +139,17 @@ const comparable = (value: unknown, target: unknown) =>
   typeRank(value) !== 4;
 
 function valueMatches(value: unknown, condition: unknown): boolean {
+  if (value instanceof Branched) {
+    const values = value.values.length > 0 ? value.values : [undefined];
+    if (!isOperatorObject(condition)) {
+      return values.some((v) => valueMatches(v, condition));
+    }
+    return Object.entries(condition).every(([operator, argument]) =>
+      holdsForAll(operator, argument)
+        ? values.every((v) => valueMatches(v, { [operator]: argument }))
+        : values.some((v) => valueMatches(v, { [operator]: argument })),
+    );
+  }
   if (!isOperatorObject(condition)) return equalsOrContains(value, condition);
   return Object.entries(condition).every(([operator, argument]) => {
     switch (operator) {

@@ -13,10 +13,14 @@ export interface TrackerStore<T> {
 }
 
 // Whether a fresh result is the same as the last, so the component keeps the
-// old one (and its identity). Dates and documents compare by value; a Map or
-// Set compares by identity, as EJSON doesn't look inside them.
+// old one (and its identity). Dates and documents compare by value. A Map or
+// Set compares by identity: EJSON.equals doesn't look inside them (nor did
+// Meteor's), so two different ones would read as equal and a changed one
+// would never reach the component.
 const sameResult = (previous: unknown, next: unknown) =>
-  EJSON.equals(previous, next);
+  previous instanceof Map || previous instanceof Set
+    ? previous === next
+    : EJSON.equals(previous, next);
 
 export function createTrackerStore<T>(
   fn: () => T,
