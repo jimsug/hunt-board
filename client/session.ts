@@ -31,6 +31,14 @@ export const RENEW_RETRY_MS = 10 * 1000;
 const INITIAL_BACKOFF_MS = 1000;
 const MAX_BACKOFF_MS = 30 * 1000;
 
+// Messages are handed on in bursts, as Meteor's connection buffered its
+// writes: a burst ends 5 ms after its last message, or 500 ms after its
+// first. The documents one call wrote reach the store together, so the
+// board renders their new state once (a frame and the notes in it moving as
+// one), and a call's answer comes after what it changed.
+export const BUFFER_QUIET_MS = 5;
+export const BUFFER_MAX_MS = 500;
+
 // Closes the server won't take back: another hello would only get the same
 // answer
 const TERMINAL_CODES = new Set([
@@ -107,9 +115,10 @@ export class Session {
   private reconnectTimer: ReturnType<typeof setTimeout> | undefined;
   private renewTimer: ReturnType<typeof setTimeout> | undefined;
   private stopped = false;
-  // Set while the socket is being closed on purpose to open another (a
-  // hideInk change), so the close doesn't count as a drop
-  private reopening = false;
+  // Messages waiting for the burst they're in to end
+  private buffered: ServerMessage[] = [];
+  private flushTimer: ReturnType<typeof setTimeout> | undefined;
+  private flushBy: number | undefined;
   // The welcome's own listener for token replies, when the default asker is
   // in use
   private readonly onMessageEvent: ((event: MessageEvent) => void) | undefined;
@@ -183,6 +192,7 @@ export class Session {
     const ws = this.ws;
     this.ws = undefined;
     ws?.close(1000, "Leaving");
+    this.flush();
     this.refusePending(1000, "Leaving");
     this.setState({ status: "closed", code: 1000, reason: "Leaving" });
   }
@@ -196,19 +206,14 @@ export class Session {
     this.scheduleRenewal();
   }
 
-  // The server reads hideInk from the hello only, so changing it means a
-  // new socket, whose welcome brings the snapshot without (or with) ink.
+  // Hiding or showing ink is another hello on the same socket, whose
+  // welcome brings the snapshot again, without (or with) the ink's points.
   setHideInk(hideInk: boolean) {
     if (hideInk === this.hideInk) return;
     this.hideInk = hideInk;
-    const ws = this.ws;
-    if (!ws) return;
-    this.reopening = true;
-    this.ws = undefined;
-    ws.close(1000, "Reopening");
-    this.refusePending(1000, "Reopening");
-    this.setState({ status: "reconnecting" });
-    this.connect();
+    if (this.ws?.readyState === this.WebSocketImpl.OPEN && this.welcome) {
+      this.sendHello();
+    }
   }
 
   // A method call, answered with its value or refused with a ServiceError
@@ -244,7 +249,7 @@ export class Session {
     this.send({
       t: "hello",
       token: this.token,
-      ...(this.hideInk ? { hideInk: true } : {}),
+      hideInk: this.hideInk,
     });
   }
 
@@ -266,6 +271,32 @@ export class Session {
     } catch {
       return;
     }
+    // Pings are answered at once; the rest waits for its burst
+    if (message.t === "ping") {
+      this.send({ t: "pong" });
+      return;
+    }
+    this.buffered.push(message);
+    const now = Date.now();
+    this.flushBy ??= now + BUFFER_MAX_MS;
+    clearTimeout(this.flushTimer);
+    this.flushTimer = setTimeout(
+      () => this.flush(),
+      Math.max(0, Math.min(BUFFER_QUIET_MS, this.flushBy - now)),
+    );
+  }
+
+  // Hands every buffered message on, in order
+  private flush() {
+    clearTimeout(this.flushTimer);
+    this.flushTimer = undefined;
+    this.flushBy = undefined;
+    const messages = this.buffered;
+    this.buffered = [];
+    for (const message of messages) this.handle(message);
+  }
+
+  private handle(message: ServerMessage) {
     switch (message.t) {
       case "welcome":
         this.welcome = message;
@@ -284,8 +315,6 @@ export class Session {
         this.handlers.presence?.(message);
         return;
       case "ping":
-        this.send({ t: "pong" });
-        return;
       case "pong":
         return;
       case "result":
@@ -310,14 +339,11 @@ export class Session {
   }
 
   private closed(code: number, reason: string) {
+    this.flush();
     this.welcome = undefined;
     this.refusePending(code, reason || "Disconnected");
     clearTimeout(this.renewTimer);
     if (this.stopped) return;
-    if (this.reopening) {
-      this.reopening = false;
-      return;
-    }
     if (TERMINAL_CODES.has(code)) {
       const expiry = tokenExpiry(this.token);
       const expired =

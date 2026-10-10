@@ -225,6 +225,21 @@ describe("Session", () => {
     assert.lengthOf(seen.welcomes, 1);
   });
 
+  it("hides and shows ink with another hello on the same socket", async () => {
+    const { session, seen } = open(operator);
+    await untilOpen(session);
+    const states = seen.states.length;
+    session.setHideInk(true);
+    await waitForAssertion(() => assert.lengthOf(seen.welcomes, 2));
+    assert.isDefined(seen.welcomes[1]?.snapshot);
+    assert.equal(session.status, "open");
+    // No reconnect: nothing but open since
+    assert.isTrue(seen.states.slice(states).every((s) => s.status === "open"));
+    session.setHideInk(true);
+    session.setHideInk(false);
+    await waitForAssertion(() => assert.lengthOf(seen.welcomes, 3));
+  });
+
   it("reads a token's expiry", () => {
     const exp = Date.now() + 1000;
     assert.equal(tokenExpiry(tokenOf({ ...operator, exp })), exp);
