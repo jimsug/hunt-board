@@ -1,0 +1,24 @@
+/* The board fills the iframe it's framed in. */
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+.jr-board-page {
+  position: relative;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.jr-board-page > .jr-board-canvas {
+  flex: 1 1 auto;
+  min-height: 0;
+  position: relative;
+}
+
+.jr-board-message {
+  margin: 16px;
+}
