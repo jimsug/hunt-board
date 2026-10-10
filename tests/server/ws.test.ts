@@ -172,6 +172,7 @@ describe("ws", () => {
 
     it("takes a renewed token on the same socket", async () => {
       const { client } = await join(member);
+      const watching = await join(operator);
       client.send({
         t: "hello",
         token: tokenOf({ ...member, name: "Renamed" }),
@@ -181,6 +182,11 @@ describe("ws", () => {
       assert.notProperty(again, "snapshot");
       // Still on the board
       await client.call("upsertNodes", { nodes: [textNode()] });
+      // And the others hear the new name
+      const renamed = await watching.client.next(
+        (m) => m.t === "live" && (m as { name?: string }).name === "Renamed",
+      );
+      assert.equal((renamed as { user: string }).user, member.user);
     });
 
     it("sends the snapshot again when a renewal hides or shows ink", async () => {

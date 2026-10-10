@@ -138,8 +138,8 @@ export function leaveLive(room: RoomLive, connectionId: string) {
 }
 
 // Takes a connection's new token (a demotion, a promotion, leaving the
-// hunt) and takes off its presence whatever the new access no longer
-// allows. Returns the presence if it changed, for broadcast.
+// hunt, a new name) and takes off its presence whatever the new access no
+// longer allows. Returns the presence if it changed, for broadcast.
 export function setLiveClaims(
   room: RoomLive,
   connectionId: string,
@@ -148,12 +148,21 @@ export function setLiveClaims(
   const state = room.connections.get(connectionId);
   if (!state) return undefined;
   state.claims = claims;
+  const renamed =
+    state.presence.name !== claims.name || state.presence.user !== claims.user;
+  if (renamed) {
+    state.presence = {
+      ...state.presence,
+      user: claims.user,
+      name: claims.name,
+    };
+  }
   const cleared = clearedFor(
     state.presence,
     boardAccess(claims, room.board).access,
   );
   if (cleared) state.presence = cleared;
-  return cleared;
+  return cleared ?? (renamed ? state.presence : undefined);
 }
 
 // Everyone's presence, for a new arrival.
