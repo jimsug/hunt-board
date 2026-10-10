@@ -8,6 +8,7 @@ describe("config", () => {
     PUBLIC_URL: "https://board.example.test",
     JR_URL: "https://jr.example.test",
     JR_SHARED_SECRET: "a-secret-that-is-at-least-32-chars-long",
+    JR_SERVICE_TOKEN: "a-resume-token",
   };
 
   const fails = (
@@ -67,6 +68,46 @@ describe("config", () => {
     fails({ JR_URL: "ftp://jr.example.test" }, /http or https/);
     fails({ JR_URL: "https://jr.example.test/path" }, /origin with no path/);
     fails({ JR_SHARED_SECRET: "short" }, /at least 32/);
+  });
+
+  it("reads the feed's credentials", () => {
+    assert.deepEqual(loadConfig(env).feed, {
+      enabled: true,
+      token: "a-resume-token",
+      email: undefined,
+      password: undefined,
+    });
+    const withPassword = loadConfig({
+      ...env,
+      JR_SERVICE_TOKEN: undefined,
+      JR_SERVICE_EMAIL: "board@example.test",
+      JR_SERVICE_PASSWORD: "hunter2",
+    });
+    assert.deepEqual(withPassword.feed, {
+      enabled: true,
+      token: undefined,
+      email: "board@example.test",
+      password: "hunter2",
+    });
+    assert.deepEqual(loadConfig({ ...env, FEED: "off" }).feed, {
+      enabled: false,
+    });
+    assert.isFalse(
+      loadConfig({ ...env, JR_SERVICE_TOKEN: undefined, FEED: "off" }).feed
+        .enabled,
+    );
+  });
+
+  it("wants credentials unless the feed is off", () => {
+    fails(
+      { JR_SERVICE_TOKEN: undefined },
+      /JR_SERVICE_TOKEN or JR_SERVICE_EMAIL/,
+    );
+    fails(
+      { JR_SERVICE_TOKEN: undefined, JR_SERVICE_EMAIL: "board@example.test" },
+      /must be set together/,
+    );
+    fails({ FEED: "maybe" }, /FEED must be on or off/);
   });
 
   it("keeps an origin as an origin", () => {

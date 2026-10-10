@@ -23,6 +23,7 @@ export const testConfig = (overrides: Partial<Config> = {}): Config => ({
   flags: [],
   s3ImageBucketName: undefined,
   s3ImageBucketRegion: undefined,
+  feed: { enabled: false },
   ...overrides,
 });
 

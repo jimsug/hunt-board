@@ -15,6 +15,17 @@ export interface Config {
   flags: string[];
   s3ImageBucketName: string | undefined;
   s3ImageBucketRegion: string | undefined;
+  feed: FeedConfig;
+}
+
+// How the feed logs in to Jolly Roger: a resume token, an email and
+// password, or both (the token first, the password once it's stale). Off is
+// a deployment with no Jolly Roger behind it.
+export interface FeedConfig {
+  enabled: boolean;
+  token?: string;
+  email?: string;
+  password?: string;
 }
 
 export class ConfigError extends Error {
@@ -55,6 +66,30 @@ function origin(env: Env, name: string): string {
   return url.origin;
 }
 
+function feedConfig(env: Env): FeedConfig {
+  const feed = env.FEED?.trim().toLowerCase();
+  if (feed === "off") return { enabled: false };
+  if (feed !== undefined && feed !== "" && feed !== "on") {
+    throw new ConfigError(
+      `FEED must be on or off, got ${JSON.stringify(feed)}`,
+    );
+  }
+  const token = env.JR_SERVICE_TOKEN?.trim() || undefined;
+  const email = env.JR_SERVICE_EMAIL?.trim() || undefined;
+  const password = env.JR_SERVICE_PASSWORD || undefined;
+  if ((email === undefined) !== (password === undefined)) {
+    throw new ConfigError(
+      "JR_SERVICE_EMAIL and JR_SERVICE_PASSWORD must be set together",
+    );
+  }
+  if (!token && !email) {
+    throw new ConfigError(
+      "JR_SERVICE_TOKEN or JR_SERVICE_EMAIL and JR_SERVICE_PASSWORD must be set, or FEED=off",
+    );
+  }
+  return { enabled: true, token, email, password };
+}
+
 export function loadConfig(env: Env = process.env): Config {
   const mongoUrl = required(env, "MONGO_URL");
   if (!/^mongodb(\+srv)?:\/\//.test(mongoUrl)) {
@@ -83,5 +118,6 @@ export function loadConfig(env: Env = process.env): Config {
       .filter((flag) => flag !== ""),
     s3ImageBucketName: env.S3_IMAGE_BUCKET_NAME?.trim() || undefined,
     s3ImageBucketRegion: env.S3_IMAGE_BUCKET_REGION?.trim() || undefined,
+    feed: feedConfig(env),
   };
 }
