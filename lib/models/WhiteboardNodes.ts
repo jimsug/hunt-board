@@ -1,0 +1,146 @@
+import { z } from "zod";
+import { foreignKey, nonEmptyString } from "../typedModel/customTypes";
+import type { ModelType } from "../typedModel/Model";
+import Model from "../typedModel/Model";
+import withCommon from "../typedModel/withCommon";
+
+export const WhiteboardNodeKinds = [
+  "puzzle",
+  "frame",
+  "sticky",
+  "text",
+  "ink",
+  // The free end of a line that isn't attached to anything.
+  "point",
+  "image",
+  "shape",
+] as const;
+export type WhiteboardNodeKind = (typeof WhiteboardNodeKinds)[number];
+
+export const WhiteboardColors = [
+  "yellow",
+  "orange",
+  "red",
+  "pink",
+  "purple",
+  "blue",
+  "green",
+  "gray",
+  "black",
+] as const;
+export type WhiteboardColor = (typeof WhiteboardColors)[number];
+
+// "marker" is the highlighter: wide and translucent.
+export const WhiteboardStrokeWidths = [
+  "thin",
+  "medium",
+  "thick",
+  "marker",
+] as const;
+export type WhiteboardStrokeWidth = (typeof WhiteboardStrokeWidths)[number];
+
+export const WhiteboardShapes = ["rect", "ellipse"] as const;
+export type WhiteboardShape = (typeof WhiteboardShapes)[number];
+
+// An ink sample: [x, y, pressure].
+export const WhiteboardInkPoint = z.tuple([z.number(), z.number(), z.number()]);
+
+const WhiteboardFrameKinds = ["group", "ungrouped", "user"] as const;
+export type WhiteboardFrameKind = (typeof WhiteboardFrameKinds)[number];
+
+// One entry in the log of who made and edited a node or line.
+export const WhiteboardContributor = z.object({
+  user: foreignKey,
+  at: z.date(),
+});
+export type WhiteboardContributorType = z.infer<typeof WhiteboardContributor>;
+
+const WhiteboardNode = withCommon(
+  z.object({
+    hunt: foreignKey,
+    board: foreignKey,
+    type: z.enum(WhiteboardNodeKinds),
+    // Frame node that contains this one. Position is relative to the parent.
+    parent: foreignKey.optional(),
+    position: z.object({ x: z.number(), y: z.number() }),
+    width: z.number().positive().optional(),
+    height: z.number().positive().optional(),
+    // Removed from the board by a person. Kept rather than deleted so that
+    // placement doesn't put it back.
+    hidden: z.boolean().optional(),
+    // A card hidden because its puzzle was deleted rather than by a person,
+    // which comes back if the puzzle does.
+    hiddenWithPuzzle: z.boolean().optional(),
+    // Set once a person has moved or reparented the node. Placement only ever
+    // moves nodes that haven't been touched by hand.
+    manual: z.boolean().optional(),
+    // A frame folded to its header for everyone. Its stored size stays the
+    // expanded one, so folding changes no geometry.
+    collapsed: z.boolean().optional(),
+    // Locked against being moved, resized, edited or deleted, and who locked
+    // it. Any type but point. Placement, restores and resets still move it.
+    locked: z.boolean().optional(),
+    lockedBy: foreignKey.optional(),
+
+    // type: "puzzle"
+    puzzle: foreignKey.optional(),
+
+    // type: "frame"
+    frameKind: z.enum(WhiteboardFrameKinds).optional(),
+    // The group:/administrivia tag a seeded frame represents. The live tag name
+    // is shown; label is the fallback if the tag goes away.
+    tag: foreignKey.optional(),
+    label: nonEmptyString.optional(),
+
+    // type: "sticky" | "text"
+    text: nonEmptyString.optional(),
+    // A shape's fill, which is clear with no colour.
+    color: z.enum(WhiteboardColors).optional(),
+
+    // type: "ink". Points are [x, y, pressure], relative to position. A long
+    // stroke is split into several nodes that share a stroke id.
+    points: WhiteboardInkPoint.array().optional(),
+    strokeWidth: z.enum(WhiteboardStrokeWidths).optional(),
+    stroke: foreignKey.optional(),
+
+    // type: "image". An object in the S3 image bucket, and its size in
+    // pixels. The node's own width and height are how big it shows. Never
+    // changes once the node is made.
+    image: z
+      .object({
+        url: nonEmptyString,
+        width: z.number().positive(),
+        height: z.number().positive(),
+      })
+      .optional(),
+
+    // type: "shape". Which shape it is, which never changes once the node
+    // is made. Its size is the node's width and height.
+    shape: z.enum(WhiteboardShapes).optional(),
+
+    // Who created and edited a board-native node, oldest first. Written only
+    // by the server.
+    contributors: WhiteboardContributor.array().default([]),
+  }),
+);
+
+const WhiteboardNodes = new Model("jr_whiteboard_nodes", WhiteboardNode);
+WhiteboardNodes.addIndex({ board: 1 });
+// A frame's contents: moving a frame checks how deep they go, and deleting
+// one moves them out
+WhiteboardNodes.addIndex({ board: 1, parent: 1 });
+WhiteboardNodes.addIndex(
+  { board: 1, puzzle: 1 },
+  { unique: true, partialFilterExpression: { puzzle: { $exists: true } } },
+);
+WhiteboardNodes.addIndex(
+  { board: 1, tag: 1 },
+  { unique: true, partialFilterExpression: { tag: { $exists: true } } },
+);
+WhiteboardNodes.addIndex(
+  { board: 1, stroke: 1 },
+  { partialFilterExpression: { stroke: { $exists: true } } },
+);
+export type WhiteboardNodeType = ModelType<typeof WhiteboardNodes>;
+
+export default WhiteboardNodes;
