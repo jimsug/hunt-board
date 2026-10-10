@@ -1,0 +1,16 @@
+{
+  "name": "hunt-board",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check:mongo": "bun run checks/mongo.ts",
+    "check:ws": "bun run checks/ws.ts"
+  },
+  "dependencies": {
+    "mongodb": "^7.7.0"
+  },
+  "devDependencies": {
+    "chai": "^6.3.0",
+    "zod": "^4.6.5"
+  }
+}
