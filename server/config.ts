@@ -95,6 +95,10 @@ function feedConfig(env: Env): FeedConfig {
 }
 
 export function loadConfig(env: Env = process.env): Config {
+  const testMode = env.TEST_MODE?.trim() === "1";
+  if (testMode && env.NODE_ENV?.trim() === "production") {
+    throw new ConfigError("TEST_MODE can't be on with NODE_ENV=production");
+  }
   const mongoUrl = required(env, "MONGO_URL");
   if (!/^mongodb(\+srv)?:\/\//.test(mongoUrl)) {
     throw new ConfigError("MONGO_URL must be a mongodb:// URL");
@@ -123,6 +127,6 @@ export function loadConfig(env: Env = process.env): Config {
     s3ImageBucketName: env.S3_IMAGE_BUCKET_NAME?.trim() || undefined,
     s3ImageBucketRegion: env.S3_IMAGE_BUCKET_REGION?.trim() || undefined,
     feed: feedConfig(env),
-    testMode: env.TEST_MODE?.trim() === "1",
+    testMode,
   };
 }

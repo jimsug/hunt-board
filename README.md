@@ -28,7 +28,7 @@ Read from the environment, checked at start (a missing one stops the process nam
 - `FEED=off` runs without the feed (a deployment with no Jolly Roger behind it: the copies are whatever was written to them).
 - `S3_IMAGE_BUCKET_NAME` and `S3_IMAGE_BUCKET_REGION` for the bucket image nodes may point at.
 - `LOG_LEVEL=debug` for the dropped-update log.
-- `TEST_MODE=1` turns on the `/test/*` endpoints the acceptance harness drives (see below). Never set it on a deployment: `/test/reset` empties the database and `/test/token` mints a token for anyone.
+- `TEST_MODE=1` turns on the `/test/*` endpoints the acceptance harness drives (see below). Never set it on a deployment: `/test/reset` empties the database and `/test/token` mints a token for anyone. The service refuses to start with it under `NODE_ENV=production`.
 
 ## Running
 

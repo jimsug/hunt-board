@@ -110,6 +110,21 @@ describe("config", () => {
     fails({ FEED: "maybe" }, /FEED must be on or off/);
   });
 
+  it("reads TEST_MODE, but never in production", () => {
+    assert.isFalse(loadConfig(env).testMode);
+    assert.isTrue(loadConfig({ ...env, TEST_MODE: "1" }).testMode);
+    assert.isTrue(
+      loadConfig({ ...env, TEST_MODE: "1", NODE_ENV: "development" }).testMode,
+    );
+    fails(
+      { TEST_MODE: "1", NODE_ENV: "production" },
+      /TEST_MODE can't be on with NODE_ENV=production/,
+    );
+    assert.isFalse(
+      loadConfig({ ...env, TEST_MODE: "0", NODE_ENV: "production" }).testMode,
+    );
+  });
+
   it("keeps an origin as an origin", () => {
     assert.equal(
       loadConfig({ ...env, JR_URL: "https://JR.example.test/" }).jrUrl,
