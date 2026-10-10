@@ -8,6 +8,7 @@ The hunt whiteboard as a service: one process with websocket rooms and Mongo beh
 - `server/` is the whiteboard server: placement and boards (`whiteboard.ts`), edits, versions, resets, the edit policy, comments, in-memory presence (`live.ts`), the call dispatcher (`methods.ts`) and the change seam (`changes.ts`); on top of that the process itself: the token (`token.ts`), the rooms that forward changes to sockets (`rooms.ts`), the websocket handler (`ws.ts`), the HTTP API and static client (`http.ts`), `startService` (`app.ts`), the configuration (`config.ts`) and the entry point (`main.ts`). `server/feed/` is the feed from Jolly Roger: a DDP client (`ddp.ts`), the hunt subscriptions that mirror puzzles and tags into the copies and hand changes to placement (`hunts.ts`), and `startFeed` (`index.ts`).
 - `client/` is the board in the browser: Jolly Roger's whiteboard canvas under `client/components/` and `client/hooks/`, the in-memory store that stands in for Minimongo (`client/store/`), the websocket session (`client/session.ts`), the call objects (`client/methods.ts`), the page (`client/WhiteboardPage.tsx`) and the entry (`client/main.tsx`). Vite builds it from `index.html` into `dist/`.
 - `tests/` holds the `bun test` suites. `tests/lib/typedModel.test.ts` and everything under `tests/server/` and `tests/client/session.test.ts` need a Mongo on `MONGO_URL` (default `mongodb://127.0.0.1:27217/huntboard`), whose contents they empty between tests. The http, ws, rooms and session suites start the service on a free port. `tests/server/feed.test.ts` also needs a running Jolly Roger (see below) and is skipped without one.
+- `tests/acceptance/` is the browser suite: Jolly Roger's whiteboard acceptance tests (`whiteboard.tsx`) running inside Chromium against the built client and a real service, with mocha, chai and Testing Library in the page (`index.html`, `runner.ts`), the service-side helpers the tests use (`harness.tsx`), the service started in test mode (`serve.ts`) and the Playwright driver under Node (`run.ts`). See "Acceptance tests" below.
 - `scripts/seed-dev.ts` fills a running service with the fixture hunt and prints links into its board, for looking at the client.
 - `checks/` are the runtime probes written before the port started; they aren't part of the build.
 
@@ -27,6 +28,7 @@ Read from the environment, checked at start (a missing one stops the process nam
 - `FEED=off` runs without the feed (a deployment with no Jolly Roger behind it: the copies are whatever was written to them).
 - `S3_IMAGE_BUCKET_NAME` and `S3_IMAGE_BUCKET_REGION` for the bucket image nodes may point at.
 - `LOG_LEVEL=debug` for the dropped-update log.
+- `TEST_MODE=1` turns on the `/test/*` endpoints the acceptance harness drives (see below). Never set it on a deployment: `/test/reset` empties the database and `/test/token` mints a token for anyone.
 
 ## Running
 
@@ -49,7 +51,7 @@ On the Jolly Roger side the account needs to exist (an ordinary user with an ema
 
 ## Connecting a client
 
-Open a websocket to `<PUBLIC_URL>/ws` and send `hello { token, hideInk? }` as the first frame, with the token from the iframe's `?token=`. Frames are EJSON (`lib/compat/ejson`), one object per frame, each with a `t`. The reply is `welcome { user, name, mayEdit, access, operator, board, connection, snapshot, jrUrl, imagesEnabled, flags }`, where `snapshot` has the board document, `nodes`, `edges`, `versions`, `comments` and, on a hunt board, `puzzles` and `tags`; `jrUrl` is Jolly Roger's origin for links out of the board, `imagesEnabled` says whether images can be added (not yet), and `flags` names the feature flags that are on. After that: `call { id, name, args }` is answered `result { id, value }` or `error { id, code, reason }`; `live { cursor, drag, stroke, selection?, editing?, editingAt?, view?, followedUser? }` reaches everyone else as `live { connection, user, name, ... }`; every write to the board arrives as `change { collection, id, doc | null }`; `presence { users }` comes on each join and leave; answer the server's `ping` with `pong`. Send `hello` again with a fresh token before the old one is a minute past its `exp`. The built client asks the page framing it for one a minute before `exp` with `postMessage({ t: "token" }, jrUrl)`, and takes a reply `{ t: "token", token }` from that origin; with no reply it shows "Reload to continue" once the server closes the socket. Close codes: 4400 bad message, 4401 bad or expired token, 4403 not allowed, 4404 no board, 4408 no pong, 4503 whiteboard off, 1009 frame too big. The schemas and message types are in `lib/protocol.ts`.
+Open a websocket to `<PUBLIC_URL>/ws` and send `hello { token, hideInk? }` as the first frame, with the token from the iframe's `?token=`. Frames are EJSON (`lib/compat/ejson`), one object per frame, each with a `t`. The reply is `welcome { user, name, mayEdit, access, operator, board, connection, snapshot, jrUrl, imagesEnabled, flags }`, where `snapshot` has the board document, `nodes`, `edges`, `versions`, `comments` and, on a hunt board, `puzzles` and `tags`; `jrUrl` is Jolly Roger's origin for links out of the board, `imagesEnabled` says whether images can be added (not yet), and `flags` names the feature flags that are on. After that: `call { id, name, args }` is answered `result { id, value }` or `error { id, code, reason }`; `live { cursor, drag, stroke, selection?, editing?, editingAt?, view?, followedUser? }` reaches everyone else as `live { connection, user, name, ... }`; every write to the board arrives as `change { collection, id, doc | null }`; `presence { users }` comes on each join and leave; answer the server's `ping` with `pong`. Send `hello` again with a fresh token before the old one is a minute past its `exp`; a `hello` that changes `hideInk` gets `welcome` with the snapshot again. The built client asks the page framing it for one a minute before `exp` with `postMessage({ t: "token" }, jrUrl)`, and takes a reply `{ t: "token", token }` from that origin; with no reply it shows "Reload to continue" once the server closes the socket. Close codes: 4400 bad message, 4401 bad or expired token, 4403 not allowed, 4404 no board, 4408 no pong, 4503 whiteboard off, 1009 frame too big. The schemas and message types are in `lib/protocol.ts`.
 
 ## Commands
 
@@ -61,6 +63,25 @@ bun test
 ```
 
 The runtime checks (`bun run check:mongo`, `check:ws`, `checks/crypto.ts`) need a Mongo on `MONGO_URL` too.
+
+## Acceptance tests
+
+```
+bun run test:acceptance                      # build the test bundle, then run it
+bun run build:acceptance                     # just the bundle, into dist-acceptance/
+node tests/acceptance/run.ts --grep <pattern> # some of the tests (mocha's grep)
+node tests/acceptance/run.ts --headed         # watch, and keep the browser open after
+```
+
+`run.ts` needs Node (22 or later; it strips the types itself) and the `playwright` package with its Chromium (`bunx playwright install chromium` once). It starts the service with `bun run tests/acceptance/serve.ts`: test mode on, no feed, the scratch Mongo's `huntboard-acceptance` database (`MONGO_URL` overrides it), serving `dist-acceptance/` on a free port. It then opens the runner page in headless Chromium, prints each test as the page reports it (`[pass]`, `[fail]` with the error and a DOM dump, `[skip]`), and exits non-zero when any failed. A failed test also gets a `[board]` line (where the board was looking, how many nodes were drawn and stored, what's in localStorage) and a screenshot under `dist-acceptance/failures/`, numbered in order, taken before Testing Library's cleanup takes the board down. The page's own console goes through too, prefixed by its level. A whole run takes a while: the slow tests are given up to a minute each, and the run an hour.
+
+In the page the tests are Jolly Roger's `tests/acceptance/whiteboard.tsx` with the helpers at the top rewritten for this data layer: the board page is rendered with a `Session` and the store, calls go through `client/methods.ts`, a second person is a second session on another token, and what Jolly Roger's own methods did (archiving the hunt, a puzzle's tags and answers, deleting a puzzle) goes through the test mode's endpoints. `PORTING.md` lists the tests that were dropped and why.
+
+The test mode's endpoints, all `POST`, JSON in and out, and all 404 without `TEST_MODE=1`:
+
+- `/test/reset`: empties the database, seeds the fixture hunt's puzzles and tags, makes its board, and answers `{ boardId, huntId }`. Open sockets are closed first.
+- `/test/token`: `{ user, name?, operator?, mayEdit?, scope? }` to `{ token }`, a five-minute token signed with the shared secret (the browser never holds the secret).
+- `/test/fixture`: `{ op: "puzzle", puzzleId?, title?, tags?, addTags?, removeTags?, answers?, expectedAnswerCount?, deleted?, replacedBy?, sync? }` writes a puzzle copy (tags by name, made as needed) and hands it to placement as the feed would, unless `sync` is false; `{ op: "fillInk", boardId, spare }` adds one ink node that leaves the board `spare` points short of its ink budget; `{ op: "clearVersions", boardId }` starts a board's history afresh; `{ op: "imageBucket", on }` sets or clears the image bucket in the process's environment.
 
 The feed's tests run against a real Jolly Roger and are skipped unless `JR_TEST_URL` is set. Start the source checkout's app on a spare port (`meteor --port 3800` in the Jolly Roger checkout; its dev Mongo listens one port up, database `meteor`), wait for it to serve, then:
 

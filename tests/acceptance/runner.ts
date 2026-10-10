@@ -88,6 +88,17 @@ async function main() {
     window.__results = results;
     console.log(`[done] ${failures} failing`);
   });
+  // Chrome reports a ResizeObserver that couldn't settle within a frame as
+  // a window error, which mocha would count as the running test's uncaught
+  // error. It isn't an exception, and the tests that care about it listen
+  // for the error event themselves (collectPageErrors), so mocha is kept
+  // from it.
+  const mochaOnError = window.onerror;
+  window.onerror = (event, ...rest) => {
+    const message = typeof event === "string" ? event : event.type;
+    if (message.includes("ResizeObserver loop")) return true;
+    return mochaOnError?.call(window, event, ...rest) ?? false;
+  };
   runner.on("pass", (test) => {
     results.passes.push({ title: test.fullTitle(), duration: test.duration });
     console.log(`[pass] ${test.fullTitle()} (${test.duration}ms)`);

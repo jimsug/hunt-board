@@ -300,8 +300,9 @@ New, to the service design; nothing here has a Jolly Roger counterpart.
   board document, its nodes, edges, versions and comments, and on a hunt
   board the hunt's puzzles and tags. A removal (`doc: null`) is forwarded
   only for an id the room has sent down, since nothing else says which
-  board it was on; ink nodes are remembered the same way so a removed one
-  is still kept from sockets that asked to hide ink. A change to the board
+  board it was on. A socket that asked to hide ink gets each ink node as
+  its outline without `points`, in the snapshot and in changes, as Jolly
+  Roger's ink publication sent them. A change to the board
   document updates `live.board`, calls `clearLiveEditsOfNonEditors` and
   sends the cleared presences, then closes (4403) any socket whose access
   became none; the board document going altogether closes everyone (4404)
@@ -318,7 +319,8 @@ New, to the service design; nothing here has a Jolly Roger counterpart.
   `hello { token, hideInk? }`: a bad token closes 4401, no board for the
   scope 4404, `disable.whiteboard` 4503, anything else first 4400. A
   second `hello` renews the token (`renewClaims`: `setLiveClaims`, a
-  `welcome` without the snapshot; another scope closes 4403). `call` goes
+  `welcome` without the snapshot unless the hello changed `hideInk`, in
+  which case the snapshot comes again; another scope closes 4403). `call` goes
   through `callMethod` with the socket as the export connection and is
   answered `result { id, value }` or `error { id, code, reason }` (a
   `ServiceError` as is, anything else logged and 500 "Internal error").
@@ -472,7 +474,10 @@ Opens the websocket, sends `hello { token, hideInk }`, answers `ping`,
 hands `welcome`, `change`, `live` and `presence` to its handlers, and
 answers `call(name, args)` with a promise settled by `result` or `error`
 (a `ServiceError` with the code and reason; a `null` value reads as
-`undefined`). A dropped socket reconnects with backoff (1 s doubling to 30 s)
+`undefined`). Everything but a ping is handed on in bursts, as Meteor's
+connection buffered its writes (5 ms after the last message, at most
+500 ms after the first), so the documents one call wrote reach the store
+in one go and render once, and the call's answer follows them. A dropped socket reconnects with backoff (1 s doubling to 30 s)
 and a fresh hello, whose welcome brings the snapshot again; the close codes
 the server won't take back (4400, 4401, 4403, 4404, 4503) leave it closed,
 and 4401 after the token's `exp` is "expired", which the page shows as
@@ -480,8 +485,8 @@ and 4401 after the token's `exp` is "expired", which the page shows as
 every ten seconds until one comes: by default
 `window.parent.postMessage({ t: "token" }, jrUrl)`, taking a reply
 `{ t: "token", token }` from that origin (`requestToken` and `setToken` for
-anything else). `setHideInk` reopens the socket, since the server reads
-`hideInk` from the hello.
+anything else). `setHideInk` sends another hello with the new `hideInk`, whose welcome
+brings the snapshot again, with or without the ink's points.
 
 ### What stands in for Meteor
 
@@ -520,8 +525,10 @@ anything else). `setHideInk` reopens the socket, since the server reads
 - `main.tsx`, `i18n.ts`, `app.css`: new. The entry opens the session with
   `?token=` (taken off the address bar), wires it to the store, and renders
   in Jolly Roger's theme by the system's colour scheme. i18next runs with
-  no resources, so every string is its inline default, and without HTML
-  escaping (React escapes).
+  no resources but the counted strings (`_one`/`_other`, from Jolly Roger's
+  `en.json`, since a default can't say both "1 reply" and "2 replies"), so
+  every other string is its inline default, and without HTML escaping
+  (React escapes).
 - `WhiteboardCanvas.tsx`: no `puzzleId` prop (comments are board-keyed), no
   presence subscription (presence comes with the room), no
   `PuzzlePeopleProvider`, no hunt name for the download's file name (the
@@ -602,6 +609,144 @@ token renewal through `requestToken`.
 prints board links with tokens for two made-up people, for looking at the
 client in a browser.
 
+## Tests (acceptance)
+
+`tests/acceptance/whiteboard.tsx` is the source's file of the same name (204
+cases of Testing Library and `fireEvent` inside a real browser against the
+real app), run the way the source ran it, in the browser, with the page
+driven by Playwright from Node (`run.ts`; the source used
+`meteortesting:mocha` with its Playwright driver). The bundle is a second
+Vite build (`vite.acceptance.config.ts`, in development mode for React's
+`act`) of `tests/acceptance/index.html`, whose `runner.ts` loads mocha's
+browser build, sets it up, imports the tests, and reports each result to the
+console and the whole run to `window.__results`. `serve.ts` starts the
+service in test mode for it; `server/testMode.ts` is the endpoints
+(`/test/reset`, `/test/token`, `/test/fixture`), served only with
+`TEST_MODE=1` and covered by `tests/server/testMode.test.ts`, which also
+checks they 404 without it.
+
+The helpers at the top of the test file are rewritten for the data layer
+(`harness.tsx`), and the test bodies are the source's but for these:
+
+- `render(<TestApp />)` plus `goTo(url)` is `goTo(url)`: the page reads its
+  address when it mounts, so going somewhere sets the address and renders
+  the board page afresh, into a fixed container over the runner's report.
+  `location.current?.search` is `window.location.search`.
+- Logging in and out is `login(person)` and `logout()` on the harness, a
+  person being a token's claims (`OPERATOR`, `MEMBER`, `SECOND`); the
+  `createTestUser`, `addHuntUser` and `promoteOperator` calls go. Archiving
+  the hunt renews every open session's token with `mayEdit` off, which is
+  what Jolly Roger would mint.
+- The second connection (`other`) is a `BoardConnection`: `other.callAsync`
+  is `other.call` (which also takes `setWhiteboardLive`, as a live frame,
+  and `updateProfile`, as a renewed token with the new name), its presence
+  subscription is `other.join()` (a socket on the board is on the board;
+  `stop` closes it a turn later, unless a call follows at once, as Jolly
+  Roger's immediate removal was undone by a live update sent straight
+  after before anyone's buffered writes flushed; the next call or join
+  opens another socket), and `theirPresence` is `other.presence`.
+- `typedSubscribe.async(...)` calls go: the data is in the store. Reads are
+  the store's sync `findOne`, `fetch` and `count` (still awaited).
+  `ChatMessages` is `BoardComments`, `sendChatMessage` is
+  `postBoardComment` with `{ text, anchor }`, `deleteWhiteboardComment` and
+  `setWhiteboardCommentResolved` are the board comment calls.
+- Jolly Roger's methods the tests called are small objects over
+  `/test/fixture`: `createPuzzle`, `addPuzzleTag`, `removePuzzleTag`,
+  `destroyPuzzle`, `undestroyPuzzle`, `setPuzzleAnswers`,
+  `markPuzzleDeleted`, `clearWhiteboardVersions`, `fillInk`,
+  `setImageBucket`. `clearPuzzleSubscribers` as a round trip is
+  `pageConnection().roundTrip()`. Every fixture write ends with the same
+  round trip, so it settles once the page's store has what it changed, as
+  a Meteor method's promise settled after its writes had reached the
+  client.
+- The comment composer is a textarea: `[data-slate-editor]` is `textarea`
+  and typing is a change event (`typeInto`).
+- The "offline" test sets the `connection` cell where it stubbed
+  `Meteor.status`; the double-click test checks `navigation.went()` (the
+  router shim's `topNavigation` seam) where it read the router's location.
+- A download is named `hunt-...`: the service doesn't know the hunt's name.
+- "turns the Image tool, pasting and dropping off" has no upload to spy on
+  (the port's `uploadChatImage` is a module function); it checks nothing
+  landed on the board instead. The three image tests that only place image
+  nodes by hand open the board with `openBoard()` rather than waiting for
+  an enabled Image tool.
+- `assert.isRejected` (chai-as-promised) is a local `rejects`.
+- `stabilize` waits for the page's socket to be open with no call awaiting
+  its answer, then a turn. Meteor's waited for every subscription to be
+  ready, polling every 200 ms, which also gave an async fetch time to land:
+  `openHistoryRow` waits for the preview's banner, since a version is
+  unpacked after its call answers and a viewer's click would otherwise land
+  on the live node.
+- "deleted and replaced puzzles" takes its stand-ins round off the board
+  afterwards. Left there, "forgets what could be undone once the layout is
+  reset" (which keeps a note far down the board while it resets the layout)
+  puts that round's frame below the note, and the phone tests, which open
+  the board fitted to everything, then see no cards.
+- Chrome's "ResizeObserver loop completed with undelivered notifications" is
+  a window error, not an exception, and mocha's browser build would count
+  it as the running test's uncaught error; the runner keeps it from mocha.
+  The tests that care about it (`collectPageErrors`) listen for the error
+  event themselves and still see it.
+- The reaction picker is a row of emoji buttons labelled with the emoji, so
+  the phone test finds `button[aria-label="✅"]` where it found
+  emoji-picker-react's `[data-unified="2705"]`.
+
+Dropped, with the reason:
+
+- `offers operators a button to create the board` and `doesn't offer to
+  create a board on an archived hunt`: the create-board page (a board comes
+  from `POST /boards`).
+- `has the minimise chat toggle at the top of the board, as on a puzzle's
+  page`, `shows a comment on the board from chat`, `switches between the
+  board and chat on a narrow screen`, `shows a comment from chat on a
+  phone, above the sheet`: chat.
+- `sends the backing puzzle's page to the board`, `goes from a puzzle's
+  page to its card on the board`, `keeps a replaced puzzle's card where it
+  was, for its replacement` (driven from the puzzle list): Jolly Roger's
+  own pages.
+- `shows the people the puzzle list would on a card`: people on cards from
+  Jolly Roger's presence.
+- `gets a handle from typedSubscribe.async for a subscription that's
+  already ready`: `typedSubscribe`.
+- `adds an image from the Image tool in the middle of the view, no wider
+  than 480`, `pastes an image at the pointer, at its own size`, `adds an
+  image file dropped on the board where it's dropped`, `leaves an image
+  dropped into a comment to the comment`, `says why an upload failed, and
+  leaves nothing on the board`: image uploads.
+- `uploads an image pasted into a comment and puts it in`, `says why an
+  image upload failed, and won't send the failed image`, `says so, and
+  uploads nothing, when the server has nowhere for images`: images in the
+  comment composer.
+- `telling a puzzle's people about a comment on its card` (the whole
+  describe, one test): notifications.
+- `shows the canvas, styled, and chat once there's a board` keeps its
+  canvas half as `shows the canvas, styled, once there's a board`.
+
+What the tests found and what changed for them:
+
+- `client/store/useTracker.ts`: a tracker whose result is a `Map` or `Set`
+  never updated, since `EJSON.equals` (as Meteor's) doesn't look inside
+  them and read two different ones as equal. Such results now compare by
+  identity (`useRoundStates` is one: a round's count never changed).
+- `client/session.ts`: messages are handed on in bursts, as Meteor's
+  connection buffered its writes (above), so the documents one call wrote
+  render once and a frame and its notes move as one.
+- Hidden ink comes as outlines without points (above), so a frame fitted
+  while ink is hidden accounts for the strokes, and hiding or showing ink is
+  another hello on the same socket rather than a reconnect, during which
+  the board had gone view-only.
+- `lib/compat/ejson.ts`: an undefined field was written as `null` where
+  Meteor's (through `JSON.stringify`) left it out, so a comment on the bare
+  board went over as `anchor: { node: null }` and the schema refused it.
+- `server/live.ts`: a renewed token's name (and user) reaches the
+  connection's presence, so a rename is heard by the others.
+- `client/session.ts`: `inFlight`, how many calls await their answer, for
+  the harness's `stabilize`.
+- `client/compat/router.ts`: `topNavigation.go` is the one place the top
+  window is sent to Jolly Roger, so a test page can record it.
+- `client/methods.ts`: `setWhiteboardLive` has a `name` ("live");
+  `client/compat/meteor.ts` has `Meteor.defer`.
+
 ## Left for later workstreams
 
 - Image uploads and the signed policy; the `tag.synonyms` setting.
@@ -613,7 +758,3 @@ client in a browser.
 - Jolly Roger's adapter answering `{ t: "token" }` from the frame with a
   fresh token, and passing `?comment=`, `?puzzle=`, `?node=` and `?v=`
   through to the iframe's url.
-- Hiding ink leaves ink nodes out of the snapshot altogether (Jolly Roger
-  sent them as outlines without points), so a frame fitted or tidied while
-  ink is hidden doesn't account for hidden strokes.
-- Acceptance: Playwright under Node against `dist/` and a running service.

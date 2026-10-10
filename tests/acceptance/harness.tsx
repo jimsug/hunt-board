@@ -308,6 +308,9 @@ export class BoardConnection {
     const welcomed = this.nextWelcome();
     this.session.setToken(token);
     await welcomed;
+    console.log(
+      `[debug renew] ${this.person.user} -> ${name}: welcome says ${this.session.welcome?.name}, status ${this.session.status}`,
+    );
   }
 
   // A call as this person, in the shape the tests made them: the boardId

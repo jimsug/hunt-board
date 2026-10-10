@@ -483,10 +483,14 @@ const historyRow = (matches: (text: string) => boolean) =>
     return found;
   });
 // Opens History and picks the row whose text `matches`.
+// The version is fetched and unpacked after the click, and Meteor's
+// stabilize waited long enough (its subscription poll ran every 200 ms)
+// for that; here the preview's banner says when it's up.
 const openHistoryRow = async (matches: (text: string) => boolean) => {
   await click(screen.getByRole("button", { name: "History" }));
   const row = await historyRow(matches);
   await click(row);
+  await screen.findByText(/^Viewing the board as it was/);
   return row;
 };
 // What a confirming modal shows, and the same once it's up.
@@ -1634,6 +1638,32 @@ describe("whiteboard page", function () {
       await ensureBoard();
     });
 
+    // The stand-ins round these tests make is taken off the board after
+    // them: a later layout reset would otherwise put its frame below
+    // whatever note a test has left far away, and a board opened fitted to
+    // everything (the phone tests) would then show nothing.
+    const standIns: string[] = [];
+    after(async function () {
+      this.timeout(10000);
+      for (const puzzleId of standIns.splice(0)) {
+        await destroyPuzzle.callPromise({
+          puzzleId,
+          copySheetsToReplacement: false,
+        });
+      }
+      const frames = WhiteboardNodes.find({
+        board: boardId,
+        type: "frame",
+        label: "stand-ins",
+      }).fetch();
+      if (frames.length > 0) {
+        await deleteWhiteboardNodes.callPromise({
+          boardId,
+          nodeIds: frames.map((f) => f._id),
+        });
+      }
+    });
+
     // A new puzzle in a round of its own, once its card is on the board
     const puzzleOnBoard = async (title: string) => {
       const puzzleId = await createPuzzle.callPromise({
@@ -1651,6 +1681,7 @@ describe("whiteboard page", function () {
         assert.ok(found);
         return found;
       });
+      standIns.push(puzzleId);
       return { puzzleId, card };
     };
 
