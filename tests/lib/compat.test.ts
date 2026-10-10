@@ -39,6 +39,19 @@ describe("EJSON", () => {
     assert.isTrue(EJSON.equals(back, snapshot));
   });
 
+  it("leaves an undefined field out, as JSON.stringify did for Meteor's", () => {
+    assert.equal(
+      EJSON.stringify({
+        a: undefined,
+        b: 1,
+        c: { d: undefined },
+        e: [undefined],
+      }),
+      '{"b":1,"c":{},"e":[null]}',
+    );
+    assert.deepEqual(EJSON.toJSONValue({ a: undefined, b: 1 }), { b: 1 });
+  });
+
   it("escapes objects that look like its own forms", () => {
     const tricky = { a: { $date: 5 }, b: { $escape: 1 } };
     const text = EJSON.stringify(tricky);

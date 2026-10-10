@@ -106,10 +106,13 @@ function toJSONValue(item: unknown): JSONValue {
   if (isPlainObject(item)) {
     const newObj: Record<string, JSONValue> = {};
     for (const [key, value] of Object.entries(item)) {
+      // Left out, as JSON.stringify left it out of Meteor's
+      if (value === undefined) continue;
       newObj[key] = toJSONValue(value);
     }
     return newObj;
   }
+  // In an array, JSON.stringify writes null for it, as Meteor's did
   if (item === undefined) return null;
   return item as JSONValue;
 }
