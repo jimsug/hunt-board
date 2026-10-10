@@ -2483,12 +2483,6 @@ const CanvasInner = ({
     clearSelection();
   }, [previewVersionId, clearSelection]);
 
-  // A preview can't be changed, but a node in it can be picked to restore
-  // on its own. Set on each node as well as on the flow: the flow's setting
-  // reaches a node a render after it changes, and a preview's nodes appear
-  // in the render that opens it, so a viewer's first click on one would
-  // otherwise find it not yet selectable.
-  const nodesSelectable = (!readOnly || !!preview) && tool === "select";
   const shownNodes = useMemo(() => {
     if (capturing) {
       return nodes.map((n) => (n.selected ? { ...n, selected: false } : n));
@@ -2499,15 +2493,9 @@ const CanvasInner = ({
         : nodes.map((n) =>
             changed.has(n.id) ? { ...n, className: CHANGED_CLASS } : n,
           )
-    )
-      .map(keepSelectedShapeDown)
-      .map((n) =>
-        n.selectable === nodesSelectable
-          ? n
-          : { ...n, selectable: nodesSelectable },
-      );
+    ).map(keepSelectedShapeDown);
     return coarse ? shown.map(dragOnlySelected) : shown;
-  }, [nodes, changed, capturing, coarse, nodesSelectable]);
+  }, [nodes, changed, capturing, coarse]);
   const shownEdges = useMemo(() => {
     if (capturing) {
       return edges.map((e) => (e.selected ? { ...e, selected: false } : e));
@@ -2975,7 +2963,7 @@ const CanvasInner = ({
                   nodesConnectable={!readOnly && !drawingTool}
                   // A preview can't be changed, but a node in it can be picked
                   // to restore on its own.
-                  elementsSelectable={nodesSelectable}
+                  elementsSelectable={(!readOnly || !!preview) && !drawingTool}
                   panOnDrag={fingerPans}
                   selectionOnDrag={selectingArea}
                   // A finger wobbles, so on a touch screen a node only moves
