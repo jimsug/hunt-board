@@ -137,6 +137,25 @@ export function leaveLive(room: RoomLive, connectionId: string) {
   dropFullUserBuckets();
 }
 
+// Takes a connection's new token (a demotion, a promotion, leaving the
+// hunt) and takes off its presence whatever the new access no longer
+// allows. Returns the presence if it changed, for broadcast.
+export function setLiveClaims(
+  room: RoomLive,
+  connectionId: string,
+  claims: Claims,
+): LivePresence | undefined {
+  const state = room.connections.get(connectionId);
+  if (!state) return undefined;
+  state.claims = claims;
+  const cleared = clearedFor(
+    state.presence,
+    boardAccess(claims, room.board).access,
+  );
+  if (cleared) state.presence = cleared;
+  return cleared;
+}
+
 // Everyone's presence, for a new arrival.
 export function presenceOf(room: RoomLive): LivePresence[] {
   return [...room.connections.values()].map((c) => c.presence);

@@ -95,11 +95,13 @@ export function parseArgs<N extends keyof typeof Protocol>(
   if (!result.success) {
     const issue = result.error.issues[0];
     const path = issue?.path.map(String).join(".");
+    const message =
+      issue?.code === "unrecognized_keys"
+        ? `Unknown key ${issue.keys.map((key) => `'${key}'`).join(", ")}`
+        : (issue?.message ?? "invalid arguments");
     throw new ServiceError(
       400,
-      `Match error: ${issue?.message ?? "invalid arguments"}${
-        path ? ` in field ${path}` : ""
-      }`,
+      `Match error: ${message}${path ? ` in field ${path}` : ""}`,
     );
   }
   return result.data as MethodArgs<N>;

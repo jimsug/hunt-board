@@ -106,6 +106,7 @@ async function sendMessage({
       content,
       sender,
       timestamp: new Date(),
+      createdBy: sender,
       ...(parentId ? { parentId } : {}),
       ...(comment ? { comment } : {}),
       ...(thread ? { thread } : {}),

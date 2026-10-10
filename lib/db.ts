@@ -12,7 +12,12 @@ export async function connect(url: string): Promise<Db> {
   }
   // Meteor's driver drops undefined fields rather than writing them as null,
   // and the models' optional fields rely on that: an unset field is absent.
-  client = new MongoClient(url, { ignoreUndefined: true });
+  // It also handed binary fields back as Uint8Arrays, where the driver's
+  // own Binary would trip Buffer.concat on a version's chunks.
+  client = new MongoClient(url, {
+    ignoreUndefined: true,
+    promoteBuffers: true,
+  });
   await client.connect();
   database = client.db();
   return database;
