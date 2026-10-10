@@ -184,3 +184,106 @@ export const ClaimsSchema = z.strictObject({
   exp: z.number(),
   operator: z.boolean().optional(),
 });
+
+// The websocket frames, one EJSON object each (dates and binary cross the
+// wire in EJSON's form, so a live editingAt or an export's bytes survive).
+// The client sends hello first, then calls and live updates; the server
+// answers hello with welcome, a call with result or error, and sends every
+// change to the socket's board and everyone's presence as it goes.
+
+export const Hello = z.strictObject({
+  t: z.literal("hello"),
+  token: z.string(),
+  // Leave ink nodes out of the snapshot and the changes (a tab on a slow
+  // connection, say)
+  hideInk: z.boolean().optional(),
+});
+export const Call = z.strictObject({
+  t: z.literal("call"),
+  id: z.union([z.string(), z.number()]),
+  name: z.string(),
+  args: z.unknown().optional(),
+});
+export const LiveMessage = z.strictObject({
+  t: z.literal("live"),
+  ...Live.shape,
+});
+export const Ping = z.strictObject({ t: z.literal("ping") });
+export const Pong = z.strictObject({ t: z.literal("pong") });
+export const ClientMessage = z.discriminatedUnion("t", [
+  Hello,
+  Call,
+  LiveMessage,
+  Ping,
+  Pong,
+]);
+export type ClientMessage = z.infer<typeof ClientMessage>;
+
+export interface Snapshot {
+  board: object;
+  nodes: object[];
+  edges: object[];
+  versions: object[];
+  comments: object[];
+  // The hunt's copies, on the hunt's board only
+  puzzles?: object[];
+  tags?: object[];
+}
+
+export interface Welcome {
+  t: "welcome";
+  user: string;
+  name: string;
+  // The token's ceiling, and what the board's policy makes of it now
+  mayEdit: boolean;
+  access: "edit" | "comment" | "view" | "none";
+  operator: boolean;
+  // The board's id
+  board: string;
+  // This socket's connection id, which its own presence carries
+  connection: string;
+  // Left out when the hello renewed a token on a socket that already had
+  // its snapshot
+  snapshot?: Snapshot;
+}
+export interface Change {
+  t: "change";
+  collection: string;
+  id: string;
+  doc: object | null;
+}
+export interface CallResult {
+  t: "result";
+  id: string | number;
+  value: unknown;
+}
+export interface CallError {
+  t: "error";
+  id: string | number | null;
+  code: number;
+  reason: string;
+}
+// Someone's presence, after one of their live updates or when access took
+// something off it
+export type LiveBroadcast = { t: "live" } & object;
+export interface Presence {
+  t: "presence";
+  users: object[];
+}
+export type ServerMessage =
+  | Welcome
+  | Change
+  | CallResult
+  | CallError
+  | LiveBroadcast
+  | Presence
+  | { t: "ping" }
+  | { t: "pong" };
+
+// Close codes the server uses beyond the standard ones
+export const CLOSE_BAD_TOKEN = 4401;
+export const CLOSE_FORBIDDEN = 4403;
+export const CLOSE_NO_BOARD = 4404;
+export const CLOSE_BAD_MESSAGE = 4400;
+export const CLOSE_TIMED_OUT = 4408;
+export const CLOSE_BOARD_OFF = 4503;

@@ -62,7 +62,8 @@ export const ungroupedLabel = () => "Ungrouped";
 export const huntBoardSelector = (huntId: string) =>
   ({ hunt: huntId, puzzle: { $exists: false } }) as const;
 
-const scopeSelector = (scope: BoardScope) =>
+// The board a token's scope names
+export const scopeSelector = (scope: BoardScope) =>
   scope.puzzle
     ? ({ hunt: scope.hunt, puzzle: scope.puzzle } as const)
     : huntBoardSelector(scope.hunt);
