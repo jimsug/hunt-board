@@ -1,3 +1,4 @@
+import { EJSON } from "lib/compat/ejson";
 import Puzzles from "lib/models/Puzzles";
 import Tags from "lib/models/Tags";
 import Whiteboards from "lib/models/Whiteboards";
@@ -13,9 +14,10 @@ import type { DataMessage, DdpClient, DdpError, Subscription } from "./ddp";
 // documents they deliver are mirrored into Puzzles and Tags (only the fields
 // the copies declare), and the puzzles a batch of changes touched go to the
 // board's deferred placement, as Jolly Roger's own hooks sent them. After
-// every connect the server sends everything again; once a hunt's pair is
-// ready, any copy it didn't send is retired, so a change missed while
-// disconnected is caught up.
+// every connect the server sends everything again; a document the copy
+// already holds as sent isn't written again (so the rooms hear nothing of
+// it), and once a hunt's pair is ready, any copy it didn't send is retired,
+// so a change missed while disconnected is caught up.
 
 // Jolly Roger has no tags-only publication: the puzzle list's sends the
 // hunt's tags (and its puzzles again, which the server sends once).
@@ -78,6 +80,39 @@ function keep(
   return kept;
 }
 
+type Copy = Record<string, unknown>;
+
+// Whether the copy already is what replacing it with doc would store:
+// every field sent is stored as sent, and a declared field not sent is
+// absent, or holds its default, or is one a write fills in (the updated
+// stamps).
+function holds(model: AnyModel, copy: Copy, doc: Copy, declared: Set<string>) {
+  for (const key of declared) {
+    const sent = doc[key];
+    const stored = copy[key];
+    if (sent !== undefined) {
+      if (!EJSON.equals(sent, stored)) return false;
+      continue;
+    }
+    if (stored === undefined) continue;
+    const auto = model.autoPopulated[key];
+    if (auto && auto.when !== "insert") continue;
+    const dflt = model.defaults[key];
+    if (dflt && EJSON.equals(dflt(), stored)) continue;
+    return false;
+  }
+  return true;
+}
+
+// Whether a $set of set and a $unset of unset would change the copy
+function changes(copy: Copy, set: Copy, unset: string[]) {
+  return (
+    Object.entries(set).some(
+      ([key, value]) => !EJSON.equals(value, copy[key]),
+    ) || unset.some((key) => copy[key] !== undefined)
+  );
+}
+
 export function startHuntFeeds({
   client,
   logger = Logger,
@@ -129,7 +164,7 @@ export function startHuntFeeds({
   }
 
   // Once both subscriptions have sent everything, copies the server didn't
-  // send are retired and the whole hunt goes to placement in one batch
+  // send are retired and what changed goes to placement in one batch
   async function reconcile(feed: HuntFeed) {
     if (feed.loaded || feed.ready.size < feed.subs.length) return;
     const stale = async (model: AnyModel, seen: Set<string>) => {
@@ -156,16 +191,25 @@ export function startHuntFeeds({
     await flush(feed);
   }
 
+  // Mirrors one message into the copy: the hunt it belongs to, and whether
+  // the copy changed (a document sent again after a reconnect doesn't
+  // change it, and isn't written, so the rooms hear nothing of it).
   async function mirror(
     model: AnyModel,
     declared: Set<string>,
     message: DataMessage,
-  ): Promise<string | undefined> {
+  ): Promise<{ hunt: string; changed: boolean } | undefined> {
     const { id } = message;
+    const copy = (await model.findOneAllowingDeletedAsync(id)) as
+      | (Copy & { hunt: string; deleted?: boolean })
+      | undefined;
     if (message.msg === "added") {
       const doc = keep(message.fields, declared);
       const hunt = doc.hunt;
       if (typeof hunt !== "string" || !feeds.has(hunt)) return undefined;
+      if (copy && holds(model, copy, doc, declared)) {
+        return { hunt, changed: false };
+      }
       try {
         await model.upsertAsync({ _id: id }, doc);
       } catch (error) {
@@ -177,16 +221,15 @@ export function startHuntFeeds({
         });
         return undefined;
       }
-      return hunt;
+      return { hunt, changed: true };
     }
-    const copy = await model.findOneAllowingDeletedAsync(id, {
-      projection: { hunt: 1 },
-    });
     if (!copy || !feeds.has(copy.hunt)) return undefined;
     if (message.msg === "changed") {
       const set = keep(message.fields, declared);
       const unset = (message.cleared ?? []).filter((k) => declared.has(k));
-      if (Object.keys(set).length === 0 && unset.length === 0) return undefined;
+      if (!changes(copy, set, unset)) {
+        return { hunt: copy.hunt, changed: false };
+      }
       const mod: Record<string, unknown> = {};
       if (Object.keys(set).length > 0) mod.$set = set;
       if (unset.length > 0) {
@@ -204,9 +247,10 @@ export function startHuntFeeds({
         return undefined;
       }
     } else {
+      if (copy.deleted) return { hunt: copy.hunt, changed: false };
       await model.destroyAsync({ _id: id });
     }
-    return copy.hunt;
+    return { hunt: copy.hunt, changed: true };
   }
 
   async function handle(message: DataMessage) {
@@ -214,15 +258,16 @@ export function startHuntFeeds({
     const isPuzzle = message.collection === Puzzles.name;
     const isTag = message.collection === Tags.name;
     if (!isPuzzle && !isTag) return;
-    const hunt = isPuzzle
+    const mirrored = isPuzzle
       ? await mirror(Puzzles, PUZZLE_FIELDS, message)
       : await mirror(Tags, TAG_FIELDS, message);
-    if (!hunt) return;
-    const feed = feeds.get(hunt);
+    if (!mirrored) return;
+    const feed = feeds.get(mirrored.hunt);
     if (!feed) return;
     const seen = isPuzzle ? feed.seenPuzzles : feed.seenTags;
     if (message.msg === "removed") seen.delete(message.id);
     else seen.add(message.id);
+    if (!mirrored.changed) return;
     (isPuzzle ? feed.dirtyPuzzles : feed.dirtyTags).add(message.id);
     scheduleFlush(feed);
   }

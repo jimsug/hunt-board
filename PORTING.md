@@ -242,7 +242,8 @@ in-lock guard pairs as the source has them.
   installed on Whiteboards, WhiteboardNodes, WhiteboardEdges,
   WhiteboardVersions, BoardComments, Puzzles and Tags when
   `whiteboardShared.ts` is imported. An update finds the ids its selector
-  matches before writing, so a write costs a read or two more.
+  matches before writing, so a write costs a read or two more; an upsert
+  under a pinned id that inserts notifies that id once.
 - `withLock.ts`: a waiter hears this process's releases through an
   `EventEmitter` and looks for another process's every 50 ms, in place of
   `observeChangesAsync`; a `stopped` flag ends the poll once the wait is
@@ -390,7 +391,9 @@ scratch Mongo and wraps a Bun `WebSocket` as `TestClient` (`hello`, `call`,
 `next`, `none`, `closed`). `token.test.ts` (9), `config.test.ts` (7), `http.test.ts` (15),
 `ws.test.ts` (26) and `rooms.test.ts` (7) cover what the design asks for;
 64 cases in all. `ddp.test.ts` (8) runs the DDP client against a fake
-socket, and `feed.test.ts` has one case without a server (`FEED=off`) and
+socket (`fakeDdp.ts`), `hunt-feeds.test.ts` runs the hunt feed against the
+same fake (a full send, a reconnect's resend written only where it
+changed), and `feed.test.ts` has one case without a server (`FEED=off`) and
 nine against a running Jolly Roger (login, the first load and placement, a
 puzzle added, a tag change moving a card, a renamed tag, a deleted puzzle
 hidden and shown again, a reconnect's resync, and a deleted board), skipped
@@ -427,10 +430,14 @@ over there and arriving here over DDP.
   received. The puzzles a batch touched (for a tag, those carrying it, as
   `renameOrMergeTag` found them) go to `deferSyncPuzzlesOnBoard` 50 ms
   after the last change; `deferSyncRoundsOnBoard` isn't used, since no
-  Jolly Roger tag path called it. After a connect the hunt's batch waits
-  until both subscriptions are ready, then copies the server didn't send
-  are retired and the whole hunt goes to placement at once. A board's
-  deletion drops the pair and the hunt's copies.
+  Jolly Roger tag path called it. A document the copy already holds as
+  sent (a resend after a reconnect; `holds` compares the declared fields,
+  allowing a default and the updated stamps) isn't written again, so the
+  rooms hear nothing of it; the same for a `changed` that changes nothing
+  and a `removed` of a copy already retired. After a connect the hunt's
+  batch waits until both subscriptions are ready, then copies the server
+  didn't send are retired and what changed goes to placement at once. A
+  board's deletion drops the pair and the hunt's copies.
 - `index.ts` (`startFeed`): the client on `<JR_URL>/websocket` with the
   configured credentials, plus the hunt feeds; `app.ts` starts it once the
   server is listening (unless `FEED=off`) and stops it first on shutdown.
