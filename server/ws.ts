@@ -32,6 +32,12 @@ import { scopeSelector } from "./whiteboard";
 // to a pasted board.
 export const MAX_FRAME_BYTES = 64 * 1024;
 export const MAX_CALL_BYTES = MAX_CLIP_LENGTH;
+// A call's frame: the clip plus the envelope around it
+export const MAX_CALL_FRAME_BYTES = MAX_CALL_BYTES + MAX_FRAME_BYTES;
+// How a call frame starts on the wire, as EJSON.stringify writes it with t
+// first. A frame over MAX_FRAME_BYTES is only parsed when it begins like
+// this (and the socket has joined, so the sender is someone on the board).
+const CALL_PREFIX = '{"t":"call"';
 export const PING_INTERVAL_MS = 25 * 1000;
 // A socket whose token has been expired this long without a renewed hello
 // is closed at its next ping. Calls in the meantime still go through: the
@@ -224,6 +230,16 @@ export function createWebSocketHandler({
       closeSocket(ws, 1003, "Text frames only");
       return;
     }
+    // Sized before parsing, so an oversize frame costs no more than a look
+    // at its first bytes
+    const bytes = frameBytes(frame);
+    if (bytes > MAX_FRAME_BYTES) {
+      const maybeCall = ws.data.room !== null && frame.startsWith(CALL_PREFIX);
+      if (!maybeCall || bytes > MAX_CALL_FRAME_BYTES) {
+        closeSocket(ws, 1009, "Frame too large");
+        return;
+      }
+    }
     let parsed: unknown;
     try {
       parsed = EJSON.parse(frame);
@@ -242,7 +258,8 @@ export function createWebSocketHandler({
       return;
     }
     const message = result.data;
-    if (message.t !== "call" && frameBytes(frame) > MAX_FRAME_BYTES) {
+    // A frame that began like a call but parsed as something else
+    if (message.t !== "call" && bytes > MAX_FRAME_BYTES) {
       closeSocket(ws, 1009, "Frame too large");
       return;
     }
@@ -289,7 +306,7 @@ export function createWebSocketHandler({
   }
 
   const websocket: WebSocketHandler<SocketData> = {
-    maxPayloadLength: MAX_CALL_BYTES + MAX_FRAME_BYTES,
+    maxPayloadLength: MAX_CALL_FRAME_BYTES,
     open(ws) {
       ws.data.pinger = setInterval(() => ping(ws), pingIntervalMs);
     },

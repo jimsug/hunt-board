@@ -503,5 +503,23 @@ describe("ws", () => {
       client.sendRaw(new Uint8Array([1, 2, 3]).buffer);
       assert.equal((await client.closed).code, 1003);
     });
+
+    // Neither frame below is JSON, so a 1009 says it was sized before it
+    // was parsed (parsing would have answered 4400 or an error frame)
+    it("sizes an oversize frame before hello without parsing it", async () => {
+      const client = await connect();
+      client.sendRaw(`{"t":"call",${"x".repeat(MAX_FRAME_BYTES)}`);
+      const closed = await client.closed;
+      assert.equal(closed.code, 1009);
+      assert.equal(closed.reason, "Frame too large");
+    });
+
+    it("sizes an oversize frame that isn't a call before parsing it", async () => {
+      const { client } = await join(member);
+      client.sendRaw(`{"t":"live",${"x".repeat(MAX_FRAME_BYTES)}`);
+      const closed = await client.closed;
+      assert.equal(closed.code, 1009);
+      assert.equal(closed.reason, "Frame too large");
+    });
   });
 });

@@ -285,12 +285,14 @@ New, to the service design; nothing here has a Jolly Roger counterpart.
   `<base64url(JSON)>.<base64url(HMAC-SHA256)>` with a timing-safe compare.
   Verification refuses a bad signature before it reads the claims, then a
   version other than 1, claims that don't fit `ClaimsSchema`, an `exp` that
-  has passed, and one more than five minutes ahead. The service never
-  mints; `signToken` is for tests and Jolly Roger's adapter.
+  has passed, and one more than five minutes plus a minute's clock skew
+  ahead. The service never mints; `signToken` is for tests and Jolly
+  Roger's adapter.
 - `config.ts`: `loadConfig(env)` reads `MONGO_URL`, `PORT` (default 3100),
   `PUBLIC_URL`, `JR_URL`, `JR_SHARED_SECRET` (32 characters at least),
   `FLAGS` and `S3_IMAGE_BUCKET_NAME`/`_REGION`, and throws a `ConfigError`
   naming the variable. `PUBLIC_URL` and `JR_URL` must be bare origins.
+  `TEST_MODE=1` is refused under `NODE_ENV=production`.
   `flags.ts` and `images.ts` still read their variables themselves; the
   config only checks them.
 - `rooms.ts`: a room per board, made by the first `joinRoom` (which loads
@@ -330,9 +332,10 @@ New, to the service design; nothing here has a Jolly Roger counterpart.
   server sends `ping` every 25 s and closes 4408 if the last one wasn't
   answered (any frame counts); a client `ping` gets `pong`. A socket whose
   token has been expired for a minute without a renewal is closed 4401 at
-  its next ping. Frames over 64 KiB close 1009 unless they're a `call`,
-  which may be as big as `MAX_CLIP_LENGTH` (a pasted board); binary frames
-  close 1003.
+  its next ping. Frames are sized before they're parsed: one over 64 KiB
+  closes 1009 unless the socket has joined its room and the frame begins
+  `{"t":"call"`, in which case it may be as big as `MAX_CLIP_LENGTH` plus
+  the envelope (a pasted board); binary frames close 1003.
 - `http.ts`: `POST /boards`, `DELETE /boards/:id` and
   `GET /boards/:id/activity` behind a timing-safe `Authorization: Bearer`
   check, `GET /healthz`, and the client from `dist/` (`index.html` for `/`
