@@ -138,7 +138,12 @@ export function createWebSocketHandler({
     }
     if (ws.data.room && ws.data.member) {
       try {
-        renewClaims(ws.data.room, ws.data.member.id, claims);
+        await renewClaims(
+          ws.data.room,
+          ws.data.member.id,
+          claims,
+          message.hideInk,
+        );
       } catch (error) {
         closeSocket(
           ws,

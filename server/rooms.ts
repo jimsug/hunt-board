@@ -55,10 +55,8 @@ export interface Room {
   live: RoomLive;
   seats: Map<string, Seat>;
   // The ids of the documents the room has sent down, so a removal is only
-  // forwarded for a document the room had, and ink is told from the rest
-  // once it's gone
+  // forwarded for a document the room had
   known: Set<string>;
-  ink: Set<string>;
   // When each person was last seen doing something, for the activity feed
   lastSeen: Map<string, { name: string; at: Date }>;
   unsubscribe: () => void;
@@ -88,7 +86,6 @@ async function loadRoom(boardId: string): Promise<Room> {
     live: createRoomLive(board),
     seats: new Map(),
     known: new Set([boardId]),
-    ink: new Set(),
     lastSeen: new Map(),
     unsubscribe: () => {},
     dropTimer: null,
@@ -149,10 +146,9 @@ export async function snapshot(
     throw new ServiceError(403, "Not a member of this hunt");
   }
   const boardId = board._id;
-  const nodes = await WhiteboardNodes.find({
-    board: boardId,
-    ...(hideInk ? { type: { $ne: "ink" } } : {}),
-  }).fetchAsync();
+  const nodes = (
+    await WhiteboardNodes.find({ board: boardId }).fetchAsync()
+  ).map((node) => (hideInk ? withoutPoints(node) : node));
   const edges = await WhiteboardEdges.find({ board: boardId }).fetchAsync();
   const versions = await WhiteboardVersions.find(
     { board: boardId },
@@ -175,11 +171,17 @@ export async function snapshot(
   };
 }
 
-function remember(room: Room, docs: { _id: string; type?: unknown }[]) {
-  for (const doc of docs) {
-    room.known.add(doc._id);
-    if (doc.type === "ink") room.ink.add(doc._id);
-  }
+// An ink node as a socket that hides ink gets it: its outline, with no
+// points, as Jolly Roger's ink publication sent it. The client keeps such
+// nodes hidden but accounts for them when a frame is fitted or tidied.
+function withoutPoints<T extends object>(node: T): T {
+  if ((node as { type?: unknown }).type !== "ink") return node;
+  const { points: _points, ...rest } = node as T & { points?: unknown };
+  return rest as T;
+}
+
+function remember(room: Room, docs: { _id: string }[]) {
+  for (const doc of docs) room.known.add(doc._id);
 }
 
 // Puts the member in the room (loading it if need be), sends them the
@@ -214,8 +216,8 @@ export async function joinRoom(
     const snap = await snapshot(board, member.claims, {
       hideInk: member.hideInk,
     });
-    remember(room, snap.nodes as { _id: string; type?: unknown }[]);
     for (const docs of [
+      snap.nodes,
       snap.edges,
       snap.versions,
       snap.comments,
@@ -268,8 +270,14 @@ export function leaveRoom(room: Room, memberId: string) {
 }
 
 // A renewed token on a member's socket. The scope has to be the board's;
-// anything else about the claims may change.
-export function renewClaims(room: Room, memberId: string, claims: Claims) {
+// anything else about the claims may change. A hello that also changes
+// whether ink is hidden gets the snapshot again, with or without points.
+export async function renewClaims(
+  room: Room,
+  memberId: string,
+  claims: Claims,
+  hideInk?: boolean,
+) {
   const seat = room.seats.get(memberId);
   if (!seat) throw new ServiceError(400, "Not on this board");
   if (boardAccess(claims, room.live.board).access === "none") {
@@ -278,6 +286,12 @@ export function renewClaims(room: Room, memberId: string, claims: Claims) {
   seat.member.claims = claims;
   const cleared = setLiveClaims(room.live, memberId, claims);
   if (cleared) broadcast(room, liveMessage(cleared));
+  if (hideInk !== undefined && hideInk !== seat.member.hideInk) {
+    seat.member.hideInk = hideInk;
+    const snap = await snapshot(room.live.board, claims, { hideInk });
+    seat.member.send(welcomeFor(room, seat.member, snap));
+    return;
+  }
   seat.member.send(welcomeFor(room, seat.member));
 }
 
@@ -336,19 +350,15 @@ function forward(room: Room, change: Change) {
   if (!mine) return;
 
   const message: ServerMessage = { t: "change", collection, id, doc };
-  const isInk =
-    collection === WhiteboardNodes.name &&
-    (doc ? doc.type === "ink" : room.ink.has(id));
-  if (doc) {
-    room.known.add(id);
-    if (isInk) room.ink.add(id);
-  } else {
-    room.known.delete(id);
-    room.ink.delete(id);
-  }
+  if (doc) room.known.add(id);
+  else room.known.delete(id);
+  // A socket that hides ink gets the outline of a stroke, not its points
+  const outline: ServerMessage | undefined =
+    collection === WhiteboardNodes.name && doc?.type === "ink"
+      ? { ...message, doc: withoutPoints(doc) }
+      : undefined;
   for (const seat of room.seats.values()) {
-    if (isInk && seat.member.hideInk) continue;
-    deliver(seat, message);
+    deliver(seat, outline && seat.member.hideInk ? outline : message);
   }
 }
 

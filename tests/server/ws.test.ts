@@ -183,6 +183,29 @@ describe("ws", () => {
       await client.call("upsertNodes", { nodes: [textNode()] });
     });
 
+    it("sends the snapshot again when a renewal hides or shows ink", async () => {
+      const { client } = await join(member);
+      const ink = zigzag(5);
+      await client.call("upsertNodes", { nodes: [ink] });
+      client.send({ t: "hello", token: tokenOf(member), hideInk: true });
+      const hidden = await client.nextOf("welcome");
+      const nodes = hidden.snapshot?.nodes as {
+        _id: string;
+        points?: unknown[];
+      }[];
+      assert.isUndefined(nodes.find((n) => n._id === ink._id)?.points);
+      client.send({ t: "hello", token: tokenOf(member) });
+      const same = await client.nextOf("welcome");
+      assert.notProperty(same, "snapshot");
+      client.send({ t: "hello", token: tokenOf(member), hideInk: false });
+      const shown = await client.nextOf("welcome");
+      const all = shown.snapshot?.nodes as {
+        _id: string;
+        points?: unknown[];
+      }[];
+      assert.lengthOf(all.find((n) => n._id === ink._id)?.points ?? [], 5);
+    });
+
     it("closes a renewal for another scope", async () => {
       const { client } = await join(member);
       client.send({
@@ -316,34 +339,49 @@ describe("ws", () => {
   });
 
   describe("ink", () => {
-    it("skips ink for a socket that hid it", async () => {
+    const pointsOf = (message: unknown) =>
+      ((message as { doc: { points?: unknown[] } }).doc ?? {}).points;
+
+    it("sends ink to a socket that hid it as an outline without points", async () => {
       const hiding = await join(member, true);
       const seeing = await join(operator);
       const ink = zigzag(5);
       const text = textNode();
       await seeing.client.call("upsertNodes", { nodes: [ink, text] });
-      await seeing.client.next(changeTo(ink._id));
+      assert.lengthOf(
+        pointsOf(await seeing.client.next(changeTo(ink._id)))!,
+        5,
+      );
+      const outline = await hiding.client.next(changeTo(ink._id));
+      assert.isUndefined(pointsOf(outline));
+      assert.equal((outline as { doc: { type: string } }).doc.type, "ink");
       await hiding.client.next(changeTo(text._id));
-      await hiding.client.none(changeTo(ink._id));
       await seeing.client.call("deleteNodes", { nodeIds: [ink._id] });
       await seeing.client.next(changeTo(ink._id));
-      await hiding.client.none(changeTo(ink._id));
+      // The outline goes when the stroke does
+      await hiding.client.next(changeTo(ink._id));
     });
 
-    it("leaves ink out of a hidden snapshot", async () => {
+    it("leaves points out of a hidden snapshot", async () => {
       const ink = zigzag(5);
       const { client } = await join(operator);
       await client.call("upsertNodes", { nodes: [ink] });
       const hiding = await join(member, true);
-      const ids = (hiding.welcome.snapshot?.nodes as { _id: string }[]).map(
-        (n) => n._id,
-      );
-      assert.notInclude(ids, ink._id);
+      const nodes = hiding.welcome.snapshot?.nodes as {
+        _id: string;
+        type: string;
+        points?: unknown[];
+      }[];
+      const outline = nodes.find((n) => n._id === ink._id);
+      assert.ok(outline);
+      assert.equal(outline.type, "ink");
+      assert.isUndefined(outline.points);
       const seeing = await join(member);
-      const all = (seeing.welcome.snapshot?.nodes as { _id: string }[]).map(
-        (n) => n._id,
-      );
-      assert.include(all, ink._id);
+      const all = seeing.welcome.snapshot?.nodes as {
+        _id: string;
+        points?: unknown[];
+      }[];
+      assert.lengthOf(all.find((n) => n._id === ink._id)?.points ?? [], 5);
     });
   });
 

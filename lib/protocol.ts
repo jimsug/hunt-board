@@ -194,8 +194,8 @@ export const ClaimsSchema = z.strictObject({
 export const Hello = z.strictObject({
   t: z.literal("hello"),
   token: z.string(),
-  // Leave ink nodes out of the snapshot and the changes (a tab on a slow
-  // connection, say)
+  // Send ink nodes as outlines without their points, in the snapshot and
+  // the changes (a tab on a slow connection, say)
   hideInk: z.boolean().optional(),
 });
 export const Call = z.strictObject({
