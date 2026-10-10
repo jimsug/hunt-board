@@ -3,6 +3,8 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "start": "bun run server/main.ts",
+    "dev": "bun --watch run server/main.ts",
     "check": "tsc --noEmit && biome check",
     "format": "biome check --write",
     "test": "bun test",
