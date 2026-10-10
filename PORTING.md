@@ -277,13 +277,91 @@ the change seam), and 42 were dropped because their subject is gone:
 - `whiteboardGuards.ts` entirely (4): Jolly Roger's methods refusing the
   backing puzzle.
 
+## `server/`: the process
+
+New, to the service design; nothing here has a Jolly Roger counterpart.
+
+- `token.ts`: `signToken(claims, secret)` and `verifyToken(token, secret)`,
+  `<base64url(JSON)>.<base64url(HMAC-SHA256)>` with a timing-safe compare.
+  Verification refuses a bad signature before it reads the claims, then a
+  version other than 1, claims that don't fit `ClaimsSchema`, an `exp` that
+  has passed, and one more than five minutes ahead. The service never
+  mints; `signToken` is for tests and Jolly Roger's adapter.
+- `config.ts`: `loadConfig(env)` reads `MONGO_URL`, `PORT` (default 3100),
+  `PUBLIC_URL`, `JR_URL`, `JR_SHARED_SECRET` (32 characters at least),
+  `FLAGS` and `S3_IMAGE_BUCKET_NAME`/`_REGION`, and throws a `ConfigError`
+  naming the variable. `PUBLIC_URL` and `JR_URL` must be bare origins.
+  `flags.ts` and `images.ts` still read their variables themselves; the
+  config only checks them.
+- `rooms.ts`: a room per board, made by the first `joinRoom` (which loads
+  the board; a second join while it loads shares the load) and dropped
+  `ROOM_GRACE_MS` (5 s) after the last leave, so a reload doesn't reload the
+  board. The room subscribes to `onChange` and forwards a `change` for the
+  board document, its nodes, edges, versions and comments, and on a hunt
+  board the hunt's puzzles and tags. A removal (`doc: null`) is forwarded
+  only for an id the room has sent down, since nothing else says which
+  board it was on; ink nodes are remembered the same way so a removed one
+  is still kept from sockets that asked to hide ink. A change to the board
+  document updates `live.board`, calls `clearLiveEditsOfNonEditors` and
+  sends the cleared presences, then closes (4403) any socket whose access
+  became none; the board document going altogether closes everyone (4404)
+  and drops the room. A new member is seated before its snapshot is read,
+  and what arrives meanwhile is queued and sent after the `welcome`.
+  `snapshot(board, claims, { hideInk })` builds the welcome payload.
+  `activityOf(boardId)` is who's been seen on the board since its room
+  loaded (join and live updates), in memory only.
+- `ws.ts`: the Bun.serve websocket handler. Frames are EJSON rather than
+  plain JSON, so a live `editingAt`, a document's dates and an export's
+  bytes cross the wire as what they are; the client parses with the same
+  `EJSON`. Frames are handled one at a time per socket, so a call sent
+  straight after the hello waits for the join. The first message must be
+  `hello { token, hideInk? }`: a bad token closes 4401, no board for the
+  scope 4404, `disable.whiteboard` 4503, anything else first 4400. A
+  second `hello` renews the token (`renewClaims`: `setLiveClaims`, a
+  `welcome` without the snapshot; another scope closes 4403). `call` goes
+  through `callMethod` with the socket as the export connection and is
+  answered `result { id, value }` or `error { id, code, reason }` (a
+  `ServiceError` as is, anything else logged and 500 "Internal error").
+  `live` goes through `applyLive` and the presence returned is sent to
+  everyone else in the room; a refused update is answered `error` with
+  `id: null`, as is a malformed frame after hello (before it, 4400). The
+  server sends `ping` every 25 s and closes 4408 if the last one wasn't
+  answered (any frame counts); a client `ping` gets `pong`. A socket whose
+  token has been expired for a minute without a renewal is closed 4401 at
+  its next ping. Frames over 64 KiB close 1009 unless they're a `call`,
+  which may be as big as `MAX_CLIP_LENGTH` (a pasted board); binary frames
+  close 1003.
+- `http.ts`: `POST /boards`, `DELETE /boards/:id` and
+  `GET /boards/:id/activity` behind a timing-safe `Authorization: Bearer`
+  check, `GET /healthz`, and the client from `dist/` (`index.html` for `/`
+  and `GET /boards/:id`, a placeholder page while there's no build;
+  `/assets/*` cached as immutable). Every HTML response carries
+  `Content-Security-Policy: frame-ancestors <JR_URL>`; API and asset
+  responses carry nothing about framing. The board url `POST /boards`
+  answers is `<PUBLIC_URL>/boards/<id>`; Jolly Roger adds `?token=`.
+- `app.ts` is `startService({ config, port })`: Bun.serve with `/ws`
+  upgraded and everything else routed to the HTTP handler, and a `stop()`
+  that closes every room's sockets (1001) and the server. `main.ts` loads
+  the config, connects, runs `ensureIndexes`, starts the service and stops
+  it on SIGTERM or SIGINT before disconnecting.
+
+Where this departs from the design document: EJSON frames; `welcome` also
+carries `access` (what the policy makes of the token now), `operator` and
+`connection` (the socket's id, which its own presence carries), and has no
+`snapshot` on a renewal; `live` isn't echoed to its sender; errors outside
+a call have `id: null`; the page lives at `/boards/:id`.
+
+## Tests (process)
+
+`tests/server/service.ts` starts the service on port 0 against the
+scratch Mongo and wraps a Bun `WebSocket` as `TestClient` (`hello`, `call`,
+`next`, `none`, `closed`). `token.test.ts` (9), `config.test.ts` (5),
+`http.test.ts` (15), `ws.test.ts` (26) and `rooms.test.ts` (7) cover what
+the design asks for; 62 cases in all.
+
 ## Left for later workstreams
 
-- The websocket, the rooms and the HTTP API: `server/changes.ts` is what a
-  room subscribes to, `server/live.ts` is what it keeps per board, and
-  `server/methods.ts` is what a `call` goes through. A room should call
-  `clearLiveEditsOfNonEditors` when its board's policy changes and
-  `setLiveClaims` when a connection's token is renewed.
+- The client under `client/`, built to `dist/`.
 - The feed: `syncPuzzlesOnBoard` and `deferSyncPuzzlesOnBoard` take the
   puzzle ids it mirrors; the `Puzzles` and `Tags` copies are written by it.
 - Image uploads and the signed policy; the `tag.synonyms` setting.
