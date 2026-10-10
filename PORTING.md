@@ -325,16 +325,24 @@ New, to the service design; nothing here has a Jolly Roger counterpart.
   became none; the board document going altogether closes everyone (4404)
   and drops the room. A new member is seated before its snapshot is read,
   and what arrives meanwhile is queued and sent after the `welcome`.
-  `snapshot(board, claims, { hideInk })` builds the welcome payload.
-  `activityOf(boardId)` is who's been seen on the board since its room
-  loaded (join and live updates), in memory only.
+  `snapshot(board, claims, { hideInk })` builds the welcome payload. Each
+  snapshot a socket is sent (the join's, and a renewal's that changes
+  `hideInk`) is one of the person's big reads, from the same bucket as
+  version and export chunks (`takeBigRead` in `whiteboardVersions.ts`): a
+  join past it is refused 429 (the socket closes 4429), a renewal past it
+  renews the token, keeps the ink as it was, and answers `welcome` without
+  the snapshot then an `error` with `id: null`. A person gets
+  `MAX_SOCKETS_PER_USER_PER_BOARD` (16) seats on a board; the next join is
+  refused 429 too. `activityOf(boardId)` is who's been seen on the board
+  since its room loaded (join and live updates), in memory only.
 - `ws.ts`: the Bun.serve websocket handler. Frames are EJSON rather than
   plain JSON, so a live `editingAt`, a document's dates and an export's
   bytes cross the wire as what they are; the client parses with the same
   `EJSON`. Frames are handled one at a time per socket, so a call sent
   straight after the hello waits for the join. The first message must be
   `hello { token, hideInk? }`: a bad token closes 4401, no board for the
-  scope 4404, `disable.whiteboard` 4503, anything else first 4400. A
+  scope 4404, `disable.whiteboard` 4503, too many seats or big reads 4429,
+  anything else first 4400. A
   second `hello` renews the token (`renewClaims`: `setLiveClaims`, a
   `welcome` without the snapshot unless the hello changed `hideInk`, in
   which case the snapshot comes again; another scope closes 4403). `call` goes

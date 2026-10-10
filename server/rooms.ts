@@ -1,6 +1,6 @@
 import type { Claims } from "lib/access";
 import { boardAccess, isAssignedOperator, isOperator } from "lib/access";
-import { ServiceError } from "lib/compat/error";
+import { isServiceError, ServiceError } from "lib/compat/error";
 import BoardComments from "lib/models/BoardComments";
 import Puzzles from "lib/models/Puzzles";
 import Tags from "lib/models/Tags";
@@ -14,6 +14,7 @@ import type {
   Snapshot,
   WhiteboardLiveState,
 } from "lib/protocol";
+import { MAX_SOCKETS_PER_USER_PER_BOARD } from "lib/whiteboard/limits";
 import type { Change } from "./changes";
 import { onChange } from "./changes";
 import type { LivePresence, RoomLive } from "./live";
@@ -28,6 +29,7 @@ import {
 } from "./live";
 import Logger from "./logger";
 import { assertWhiteboardEnabled } from "./whiteboard";
+import { takeBigRead } from "./whiteboardVersions";
 
 // A room per board: the sockets on it, their presence, and a subscription
 // to the change seam that forwards each change to the board's documents
@@ -184,9 +186,14 @@ function remember(room: Room, docs: { _id: string }[]) {
   for (const doc of docs) room.known.add(doc._id);
 }
 
+const socketsOf = (room: Room, userId: string) =>
+  [...room.seats.values()].filter((seat) => seat.member.claims.user === userId)
+    .length;
+
 // Puts the member in the room (loading it if need be), sends them the
 // welcome with the snapshot, then whatever changed while it was read, and
-// tells the room they're here.
+// tells the room they're here. The snapshot is one of the member's big
+// reads, and they get MAX_SOCKETS_PER_USER_PER_BOARD seats on a board.
 export async function joinRoom(
   boardId: string,
   member: RoomMember,
@@ -207,6 +214,10 @@ export async function joinRoom(
   const { access } = boardAccess(member.claims, board);
   if (access === "none")
     throw new ServiceError(403, "Not a member of this hunt");
+  if (socketsOf(room, member.claims.user) >= MAX_SOCKETS_PER_USER_PER_BOARD) {
+    throw new ServiceError(429, "Too many connections to this board");
+  }
+  takeBigRead(member.claims.user);
 
   const seat: Seat = { member, pending: [] };
   room.seats.set(member.id, seat);
@@ -272,7 +283,10 @@ export function leaveRoom(room: Room, memberId: string) {
 
 // A renewed token on a member's socket. The scope has to be the board's;
 // anything else about the claims may change. A hello that also changes
-// whether ink is hidden gets the snapshot again, with or without points.
+// whether ink is hidden gets the snapshot again, with or without points:
+// another of the member's big reads, and when they have none left the
+// token is renewed all the same, the ink stays as it was, and the welcome
+// comes without the snapshot, followed by a 429 error frame.
 export async function renewClaims(
   room: Room,
   memberId: string,
@@ -288,6 +302,19 @@ export async function renewClaims(
   const cleared = setLiveClaims(room.live, memberId, claims);
   if (cleared) broadcast(room, liveMessage(cleared));
   if (hideInk !== undefined && hideInk !== seat.member.hideInk) {
+    try {
+      takeBigRead(claims.user);
+    } catch (error) {
+      if (!isServiceError(error)) throw error;
+      seat.member.send(welcomeFor(room, seat.member));
+      seat.member.send({
+        t: "error",
+        id: null,
+        code: error.error,
+        reason: error.reason,
+      });
+      return;
+    }
     seat.member.hideInk = hideInk;
     const snap = await snapshot(room.live.board, claims, { hideInk });
     seat.member.send(welcomeFor(room, seat.member, snap));

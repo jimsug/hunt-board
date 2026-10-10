@@ -12,6 +12,7 @@ import {
   CLOSE_FORBIDDEN,
   CLOSE_NO_BOARD,
   CLOSE_TIMED_OUT,
+  CLOSE_TOO_MANY,
   ClientMessage,
   type ServerMessage,
 } from "lib/protocol";
@@ -189,7 +190,9 @@ export function createWebSocketHandler({
             ? CLOSE_NO_BOARD
             : error.error === 403
               ? CLOSE_FORBIDDEN
-              : CLOSE_BAD_MESSAGE,
+              : error.error === 429
+                ? CLOSE_TOO_MANY
+                : CLOSE_BAD_MESSAGE,
           error.reason,
         );
       } else {

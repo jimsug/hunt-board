@@ -22,6 +22,7 @@ import {
   ensureBoard,
 } from "./whiteboard";
 import { inkPointsOnBoard } from "./whiteboardShared";
+import { resetBigReads } from "./whiteboardVersions";
 
 // The endpoints the acceptance harness drives, served only with TEST_MODE=1:
 // without it nothing under /test exists. They stand in for what the browser
@@ -205,6 +206,7 @@ export function createTestHandler({ config, huntId }: TestModeOptions) {
     switch (pathname) {
       case "/test/reset": {
         await closeRooms((member) => member.close(1001, "Reset"));
+        resetBigReads();
         await deferredSyncsDone();
         for (const collection of await db().collections()) {
           await collection.deleteMany({});

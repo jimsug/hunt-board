@@ -51,9 +51,12 @@ export const VERSION_JOIN_MS = 60 * 1000;
 export const VERSION_KEEP_ALL_MS = 2 * 60 * 60 * 1000;
 // A version's compressed payload is stored, and fetched, in pieces this big.
 export const VERSION_CHUNK_BYTES = 4 * 1024 * 1024;
-// How many chunks of versions and exports one person can fetch a minute,
-// across all their connections.
+// How many big reads one person gets a minute, across all their
+// connections: chunks of versions and exports, and the board's snapshot
+// (a hello, and a hello that changes whether ink is hidden).
 export const BIG_READS_PER_MINUTE = 60;
+// How many sockets one person can have on one board.
+export const MAX_SOCKETS_PER_USER_PER_BOARD = 16;
 // How many part-fetched exports a server keeps at once.
 export const MAX_KEPT_EXPORTS = 8;
 // The most a board's history can take up, compressed. The oldest versions go

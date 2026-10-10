@@ -312,4 +312,5 @@ export const CLOSE_FORBIDDEN = 4403;
 export const CLOSE_NO_BOARD = 4404;
 export const CLOSE_BAD_MESSAGE = 4400;
 export const CLOSE_TIMED_OUT = 4408;
+export const CLOSE_TOO_MANY = 4429;
 export const CLOSE_BOARD_OFF = 4503;

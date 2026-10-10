@@ -2,9 +2,14 @@ import { afterAll, beforeAll, beforeEach, describe, it } from "bun:test";
 import { assert } from "chai";
 import type { Claims } from "lib/access";
 import { Random } from "lib/compat/random";
+import WhiteboardNodes from "lib/models/WhiteboardNodes";
 import Whiteboards from "lib/models/Whiteboards";
 import WhiteboardVersions from "lib/models/WhiteboardVersions";
 import type { ServerMessage } from "lib/protocol";
+import {
+  BIG_READS_PER_MINUTE,
+  MAX_SOCKETS_PER_USER_PER_BOARD,
+} from "lib/whiteboard/limits";
 import type { Service } from "../../server/app";
 import {
   closeRooms,
@@ -15,8 +20,11 @@ import {
   snapshot,
 } from "../../server/rooms";
 import { ensureBoard } from "../../server/whiteboard";
+import { takeBigRead } from "../../server/whiteboardVersions";
+import { zigzag } from "./fixtures";
 import {
   claimsFor,
+  fakeNow,
   huntId,
   makeFixtureHunt,
   makeUser,
@@ -180,6 +188,76 @@ describe("rooms", () => {
       release();
       finds.mockRestore();
     }
+  });
+
+  describe("limits", () => {
+    it("charges each snapshot to the person's big reads", async () => {
+      const ink = zigzag(5);
+      await WhiteboardNodes.insertAsync({
+        ...ink,
+        hunt: huntId,
+        board: boardId,
+        createdBy: member.user,
+      });
+      const clock = fakeNow();
+      try {
+        // Everything but one, which the snapshot takes
+        for (let i = 0; i < BIG_READS_PER_MINUTE - 1; i++) {
+          takeBigRead(member.user);
+        }
+        const { client } = await join(member);
+        const refused = await TestClient.connect(service.url);
+        clients.push(refused);
+        refused.send({ t: "hello", token: tokenOf(member) });
+        const closed = await refused.closed;
+        assert.equal(closed.code, 4429);
+        assert.match(closed.reason, /try again in a minute/);
+        // Someone else isn't held back
+        await join(operator);
+        // A renewal that hides the ink wants the snapshot again: the token
+        // is renewed without it, and the ink stays shown
+        client.send({ t: "hello", token: tokenOf(member), hideInk: true });
+        const renewed = await client.nextOf("welcome");
+        assert.notProperty(renewed, "snapshot");
+        const error = await client.nextOf("error");
+        assert.equal(error.code, 429);
+        assert.isNull(error.id);
+        clock.tick(1000);
+        client.send({ t: "hello", token: tokenOf(member), hideInk: true });
+        const hidden = await client.nextOf("welcome");
+        const nodes = hidden.snapshot?.nodes as {
+          _id: string;
+          points?: unknown[];
+        }[];
+        assert.isUndefined(nodes.find((n) => n._id === ink._id)?.points);
+      } finally {
+        clock.restore();
+      }
+    });
+
+    it("seats a person on a board a bounded number of times", async () => {
+      const seated: TestClient[] = [];
+      for (let i = 0; i < MAX_SOCKETS_PER_USER_PER_BOARD; i++) {
+        seated.push((await join(member)).client);
+      }
+      const extra = await TestClient.connect(service.url);
+      clients.push(extra);
+      extra.send({ t: "hello", token: tokenOf(member) });
+      const closed = await extra.closed;
+      assert.equal(closed.code, 4429);
+      assert.match(closed.reason, /Too many connections/);
+      // Someone else's seats aren't counted
+      await join(operator);
+      // A seat given up is a seat again
+      await seated[0]?.close();
+      await waitForAssertion(async () =>
+        assert.equal(
+          (await roomFor(boardId))?.seats.size,
+          MAX_SOCKETS_PER_USER_PER_BOARD,
+        ),
+      );
+      await join(member);
+    });
   });
 
   describe("snapshot", () => {

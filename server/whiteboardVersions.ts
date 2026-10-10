@@ -597,15 +597,17 @@ export interface ExportConnection {
   onClose(cb: () => void): void;
 }
 
-// Each person's chunk fetches, versions and exports together, across all
-// their connections: a bucket of BIG_READS_PER_MINUTE tokens refilled
-// evenly over a minute. A bucket left alone for a minute is full again, the
-// same as none, so it's dropped.
+// Each person's big reads, chunk fetches of versions and exports and the
+// board's snapshots (see rooms.ts) together, across all their connections:
+// a bucket of BIG_READS_PER_MINUTE tokens refilled evenly over a minute. A
+// bucket left alone for a minute is full again, the same as none, so it's
+// dropped.
 const bigReads = new Map<string, Bucket>();
 const BIG_READ_REFILL_MS = 60 * 1000;
 const BIG_READS_PER_SECOND = BIG_READS_PER_MINUTE / 60;
 
-function takeBigRead(userId: string) {
+// Takes one of the person's big reads, or refuses 429.
+export function takeBigRead(userId: string) {
   const now = Date.now();
   bigReads.forEach(({ refilledAt }, user) => {
     if (now - refilledAt >= BIG_READ_REFILL_MS) bigReads.delete(user);
@@ -617,6 +619,11 @@ function takeBigRead(userId: string) {
       "That's a lot of downloading; try again in a minute",
     );
   }
+}
+
+// Everyone's buckets full again, for the test harness's reset
+export function resetBigReads() {
+  bigReads.clear();
 }
 
 function dropStaleExports(now: number) {
