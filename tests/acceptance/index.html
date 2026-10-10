@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Whiteboard acceptance tests</title>
+    <style>
+      /* The board under test sits over the page; mocha's report is behind
+         it, for a human watching a headed run once the board is gone. */
+      #mocha {
+        margin: 16px;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="mocha"></div>
+    <script type="module" src="./runner.ts"></script>
+  </body>
+</html>

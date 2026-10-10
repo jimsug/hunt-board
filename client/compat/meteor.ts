@@ -18,6 +18,10 @@ export const Meteor = {
   status(): { connected: boolean } {
     return { connected: connection.get().status === "open" };
   },
+  // Runs fn once the current turn is over
+  defer(fn: () => void): void {
+    setTimeout(fn, 0);
+  },
   // A link into Jolly Roger, from a path without its leading slash
   absoluteUrl(path = ""): string {
     const origin = welcome.get()?.jrUrl ?? window.location.origin;

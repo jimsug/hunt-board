@@ -79,6 +79,7 @@ export const reactToBoardComment = method("comment.react");
 // A live update isn't a call: nothing answers it. Shaped like one so
 // useWhiteboardLive reads as it did.
 export const setWhiteboardLive = {
+  name: "live" as const,
   call(args: WithBoard<WhiteboardLiveState>): void {
     current?.sendLive(stripBoard(args) as WhiteboardLiveState);
   },
